@@ -1556,4 +1556,72 @@ mod tests {
         assert_eq!(run(&parse(&source).unwrap()).unwrap(), vec!["first second"]);
         assert!(!path.exists());
     }
+
+    #[test]
+    fn supports_game_objects_nested_assignment_and_list_mutation() {
+        let source = r#"
+            set player to {
+                health: 20,
+                inventory: []
+            }
+            set player.health to player.health minus 3
+            add "torch" to player.inventory
+            when player.inventory contains "torch", do
+                say "ready"
+            end
+            say "Health: {player.health}"
+            say length of player.inventory
+            remove "torch" from player.inventory
+            say length of player.inventory
+        "#;
+        assert_eq!(run(&parse(source).unwrap()).unwrap(), vec!["ready", "Health: 17", "1", "0"]);
+    }
+
+    #[test]
+    fn supports_scripted_input_seeded_randomness_and_game_helpers() {
+        let source = r#"
+            set random seed to 42
+            set first to random choice from ["north", "south", "east"]
+            set random seed to 42
+            set second to random choice from ["north", "south", "east"]
+            when first is second, do
+                say "seeded"
+            end
+            set answer to ask "Move? "
+            say answer
+            say minimum of 4 and 2
+            say maximum of 4 and 2
+            say clamp 10 between 0 and 5
+        "#;
+        assert_eq!(run_with_input(&parse(source).unwrap(), &["explore"]).unwrap(), vec!["seeded", "explore", "2", "4", "5"]);
+    }
+
+    #[test]
+    fn saves_and_loads_dynamic_game_state() {
+        let suffix = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let path = std::env::temp_dir().join(format!("basisread-state-{suffix}.json"));
+        let source = format!(
+            "set state to {{ health: 18, inventory: [\"key\"] }}\nsave state to file \"{}\"\nset state to load file \"{}\"\nsay state.health\nsay state.inventory at 0\ndelete file \"{}\"",
+            path.display(), path.display(), path.display()
+        );
+        assert_eq!(run(&parse(&source).unwrap()).unwrap(), vec!["18", "key"]);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn supports_implicit_while_do_error_recovery_and_game_controls() {
+        let source = r#"
+            set count to 0
+            while count is less than 2
+                say count
+                set count to count plus 1
+            end
+            try, do
+                say missing_value
+            else, do
+                say "recovered"
+            end
+        "#;
+        assert_eq!(run(&parse(source).unwrap()).unwrap(), vec!["0", "1", "recovered"]);
+    }
 }
