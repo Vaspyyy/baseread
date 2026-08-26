@@ -288,7 +288,10 @@ impl Parser {
         if self.consume_word("using") {
             while !self.is_comma_do() {
                 parameters.push(self.expect_any_word()?);
-                if !self.consume_comma() && !self.is_comma_do() {
+                if self.is_comma_do() {
+                    break;
+                }
+                if !self.consume_comma() {
                     return Err(self.error_here("expected a comma between function parameters"));
                 }
             }
@@ -496,6 +499,7 @@ impl Parser {
                     index += 1;
                 }
                 TokenKind::Newline if depth == 0 && matches!(boundary, Boundary::Line) => return index,
+                TokenKind::End if depth == 0 && matches!(boundary, Boundary::Line) => return index,
                 TokenKind::Comma if depth == 0 && matches!(boundary, Boundary::Comma) => return index,
                 _ if depth == 0 && boundary.matches(self, index, end) => return index,
                 _ => index += 1,
