@@ -76,10 +76,7 @@ impl Parser {
             return self.parse_list_add_or_remove(false);
         }
         if self.is_word("say") {
-            self.cursor += 1;
-            let expression = self.parse_expression_line()?;
-            self.finish_line()?;
-            return Ok(Statement::Say(expression));
+            return self.parse_say();
         }
         if self.is_word("run") {
             return self.parse_run();
@@ -99,6 +96,9 @@ impl Parser {
             self.finish_line()?;
             return Ok(Statement::Copy { source, destination });
         }
+        if self.starts_with_line_phrase(&["move", "cursor"]) {
+            return self.parse_move_cursor();
+        }
         if self.is_word("move") {
             self.cursor += 1;
             let source = self.parse_expression_until_word("to")?;
@@ -106,6 +106,16 @@ impl Parser {
             let destination = self.parse_expression_line()?;
             self.finish_line()?;
             return Ok(Statement::Move { source, destination });
+        }
+        if self.starts_with_line_phrase(&["hide", "cursor"]) {
+            self.cursor += 2;
+            self.finish_line()?;
+            return Ok(Statement::HideCursor);
+        }
+        if self.starts_with_line_phrase(&["show", "cursor"]) {
+            self.cursor += 2;
+            self.finish_line()?;
+            return Ok(Statement::ShowCursor);
         }
         if self.is_word("delete") {
             self.cursor += 1;
@@ -234,6 +244,35 @@ impl Parser {
         } else {
             Ok(Statement::SetPath { path, value })
         }
+    }
+
+    fn parse_say(&mut self) -> Result<Statement, BasisError> {
+        self.expect_word("say")?;
+        let line_end = self.find_line_end(self.cursor);
+        if let Some(color_index) = self.find_last_word_operator(self.cursor, line_end, &["in"]) {
+            let color = self.tokens_to_text(color_index + 1, line_end);
+            if color_index > self.cursor && is_terminal_color(&color) {
+                let expression = self.parse_expression_range(self.cursor, color_index)?;
+                self.cursor = line_end;
+                self.finish_line()?;
+                return Ok(Statement::SayColored { expression, color });
+            }
+        }
+        let expression = self.parse_expression_range(self.cursor, line_end)?;
+        self.cursor = line_end;
+        self.finish_line()?;
+        Ok(Statement::Say(expression))
+    }
+
+    fn parse_move_cursor(&mut self) -> Result<Statement, BasisError> {
+        self.expect_word("move")?;
+        self.expect_word("cursor")?;
+        self.expect_word("to")?;
+        let x = self.parse_expression_until_comma()?;
+        self.expect_comma()?;
+        let y = self.parse_expression_line()?;
+        self.finish_line()?;
+        Ok(Statement::MoveCursor { x, y })
     }
 
     fn parse_save(&mut self) -> Result<Statement, BasisError> {
@@ -451,6 +490,9 @@ impl Parser {
         }
 
         if self.starts_with_phrase(start, end, &["ask"]) {
+            if self.starts_with_phrase(start, end, &["ask", "key"]) && start + 2 == end {
+                return Ok(Expression::AskKey);
+            }
             if start + 1 >= end {
                 return Err(self.error_at(start, "expected a prompt after `ask`"));
             }
@@ -527,6 +569,12 @@ impl Parser {
         }
         if self.starts_with_phrase(start, end, &["list", "applications"]) && start + 2 == end {
             return Ok(Expression::ListApplications);
+        }
+        if self.starts_with_phrase(start, end, &["terminal", "width"]) && start + 2 == end {
+            return Ok(Expression::TerminalWidth);
+        }
+        if self.starts_with_phrase(start, end, &["terminal", "height"]) && start + 2 == end {
+            return Ok(Expression::TerminalHeight);
         }
 
         if self.token_is(start, TokenKind::LeftBracket) && self.token_is(end - 1, TokenKind::RightBracket) {
@@ -957,6 +1005,10 @@ enum Boundary<'a> {
     Line,
     Comma,
     Phrase(&'a [&'a str]),
+}
+
+fn is_terminal_color(color: &str) -> bool {
+    matches!(color.to_ascii_lowercase().as_str(), "black" | "red" | "green" | "yellow" | "blue" | "magenta" | "cyan" | "white" | "gray" | "grey" | "bright black" | "bright red" | "bright green" | "bright yellow" | "bright blue" | "bright magenta" | "bright cyan" | "bright white")
 }
 
 impl Boundary<'_> {
