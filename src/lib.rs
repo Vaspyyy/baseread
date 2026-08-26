@@ -75,6 +75,7 @@ pub enum Statement {
     Wait(Expression),
     ClearTerminal,
     DrawText { text: Expression, x: Expression, y: Expression },
+    DrawTextColored { text: Expression, x: Expression, y: Expression, color: String },
     ClearScreenBuffer,
     RenderScreen,
     ResizeScreen { width: Expression, height: Expression },
@@ -221,10 +222,22 @@ impl RandomState {
 }
 
 #[derive(Clone)]
+struct ScreenCell {
+    character: char,
+    color: Option<String>,
+}
+
+impl ScreenCell {
+    fn blank() -> Self {
+        Self { character: ' ', color: None }
+    }
+}
+
+#[derive(Clone)]
 struct ScreenBuffer {
     width: usize,
     height: usize,
-    cells: Vec<Vec<char>>,
+    cells: Vec<Vec<ScreenCell>>,
 }
 
 impl ScreenBuffer {
@@ -237,7 +250,7 @@ impl ScreenBuffer {
     fn new(width: usize, height: usize) -> Self {
         let width = width.max(1);
         let height = height.max(1);
-        Self { width, height, cells: vec![vec![' '; width]; height] }
+        Self { width, height, cells: vec![vec![ScreenCell::blank(); width]; height] }
     }
 
     fn resize(&mut self, width: usize, height: usize) {
@@ -246,11 +259,15 @@ impl ScreenBuffer {
 
     fn clear(&mut self) {
         for row in &mut self.cells {
-            row.fill(' ');
+            row.fill(ScreenCell::blank());
         }
     }
 
     fn draw_text(&mut self, text: &str, x: usize, y: usize) {
+        self.draw_text_colored(text, x, y, None);
+    }
+
+    fn draw_text_colored(&mut self, text: &str, x: usize, y: usize, color: Option<&str>) {
         if x == 0 || y == 0 { return; }
         let mut row = y - 1;
         let start_column = x - 1;
@@ -263,14 +280,31 @@ impl ScreenBuffer {
             }
             if row >= self.height { break; }
             if column < self.width {
-                self.cells[row][column] = character;
+                self.cells[row][column].character = character;
+                self.cells[row][column].color = color.map(str::to_string);
             }
             column += 1;
         }
     }
 
     fn lines(&self) -> Vec<String> {
-        self.cells.iter().map(|row| row.iter().collect()).collect()
+        self.cells.iter().map(|row| row.iter().map(|cell| cell.character).collect()).collect()
+    }
+
+    fn colored_lines(&self) -> Vec<String> {
+        self.cells.iter().map(|row| {
+            let mut line = String::new();
+            for cell in row {
+                if let Some(color) = &cell.color {
+                    line.push_str(color_code(color));
+                    line.push(cell.character);
+                    line.push_str("\x1b[0m");
+                } else {
+                    line.push(cell.character);
+                }
+            }
+            line
+        }).collect()
     }
 }
 
@@ -477,6 +511,12 @@ fn execute_block(statements: &[Statement], environment: &mut Environment, output
                 let x = terminal_coordinate(x, environment, output, "x")?;
                 let y = terminal_coordinate(y, environment, output, "y")?;
                 environment.screen.borrow_mut().draw_text(&text, x, y);
+            }
+            Statement::DrawTextColored { text, x, y, color } => {
+                let text = value_as_text(text, environment, output)?;
+                let x = terminal_coordinate(x, environment, output, "x")?;
+                let y = terminal_coordinate(y, environment, output, "y")?;
+                environment.screen.borrow_mut().draw_text_colored(&text, x, y, Some(color));
             }
             Statement::ClearScreenBuffer => {
                 environment.screen.borrow_mut().clear();
@@ -868,7 +908,8 @@ fn screen_dimension_size(value: f64, fallback: usize) -> usize {
 }
 
 fn render_screen(environment: &mut Environment, output: &mut Vec<String>) -> Result<(), BasisError> {
-    let lines = environment.screen.borrow().lines();
+    let screen = environment.screen.borrow();
+    let lines = if environment.interactive { screen.colored_lines() } else { screen.lines() };
     if environment.interactive {
         print!("\x1b[2J\x1b[H{}\n", lines.join("\n"));
         io::stdout().flush().map_err(|error| BasisError::new(0, format!("could not render screen: {error}")))?;
@@ -1940,6 +1981,16 @@ mod tests {
             say screen height
         "#;
         assert_eq!(run(&parse(source).unwrap()).unwrap(), vec!["    HP  ", " @      ", "        ", "8", "3"]);
+    }
+
+    #[test]
+    fn keeps_screen_colors_out_of_buffered_output() {
+        let source = r#"
+            resize screen to 5, 2
+            draw text "!" in red at 2, 1
+            render screen
+        "#;
+        assert_eq!(run(&parse(source).unwrap()).unwrap(), vec![" !   ", "     "]);
     }
 
     #[test]
