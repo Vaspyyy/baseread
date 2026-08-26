@@ -619,19 +619,19 @@ pub fn resolve_application(query: &str) -> Result<DesktopEntry, BasisError> {
 }
 
 fn resolve_application_in(query: &str, directories: &[PathBuf]) -> Result<DesktopEntry, BasisError> {
-    let mut candidates = Vec::new();
+    let mut entries_by_id = HashMap::new();
     for directory in directories {
         let Ok(entries) = fs::read_dir(directory) else { continue };
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().and_then(|extension| extension.to_str()) != Some("desktop") { continue; }
             if let Some(desktop_entry) = read_desktop_entry(&path) {
-                if let Some(score) = application_match_score(query, &desktop_entry) {
-                    candidates.push((score, desktop_entry));
-                }
+                entries_by_id.entry(desktop_entry.id.clone()).or_insert(desktop_entry);
             }
         }
     }
+
+    let candidates = entries_by_id.into_values().filter_map(|desktop_entry| application_match_score(query, &desktop_entry).map(|score| (score, desktop_entry))).collect::<Vec<_>>();
 
     if candidates.is_empty() {
         return Err(BasisError::new(0, format!("could not find an application matching `{query}`")));
