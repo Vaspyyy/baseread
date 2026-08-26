@@ -51,6 +51,7 @@ pub enum Statement {
     DeleteFolder(Expression),
     WriteFile { content: Expression, path: Expression },
     Shell(Expression),
+    StartShell(Expression),
     OpenFile(Expression),
     Include(Expression),
     Stop,
@@ -200,6 +201,9 @@ fn parse_block(lines: &[(usize, &str)], cursor: &mut usize, nested: bool, stop_a
             *cursor += 1;
         } else if let Some(command) = line.strip_prefix("shell ") {
             statements.push(Statement::Shell(parse_expression(command, line_number)?));
+            *cursor += 1;
+        } else if let Some(command) = line.strip_prefix("start shell ") {
+            statements.push(Statement::StartShell(parse_expression(command, line_number)?));
             *cursor += 1;
         } else if let Some(path) = line.strip_prefix("open file ") {
             statements.push(Statement::OpenFile(parse_expression(path, line_number)?));
@@ -512,6 +516,10 @@ fn execute_block(statements: &[Statement], environment: &mut Environment, output
                 let command = value_as_text(command, environment, output)?;
                 run_shell(command, output)?;
             }
+            Statement::StartShell(command) => {
+                let command = value_as_text(command, environment, output)?;
+                start_shell(command)?;
+            }
             Statement::OpenFile(path) => {
                 let path = value_as_path(path, environment, output)?;
                 open_file(path)?;
@@ -710,6 +718,11 @@ fn run_shell(command: String, output: &mut Vec<String>) -> Result<(), BasisError
         let detail = if error.is_empty() { format!("exit status {}", result.status) } else { error };
         return Err(BasisError::new(0, format!("shell command failed: {detail}")));
     }
+    Ok(())
+}
+
+fn start_shell(command: String) -> Result<(), BasisError> {
+    Command::new("sh").arg("-c").arg(&command).spawn().map_err(|error| BasisError::new(0, format!("could not start shell command: {error}")))?;
     Ok(())
 }
 
@@ -1015,6 +1028,7 @@ mod tests {
     fn parses_desktop_application_commands() {
         let program = parse("run firefox with \"--private-window\"").unwrap();
         assert!(matches!(program.statements.as_slice(), [Statement::Run { application, arguments }] if application == "firefox" && arguments.len() == 1));
+        assert!(matches!(parse("start shell \"long-running-command\"").unwrap().statements.as_slice(), [Statement::StartShell(_)]));
     }
 
     #[test]
