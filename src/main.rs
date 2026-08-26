@@ -44,7 +44,7 @@ fn main() {
             }
         }
         let output_path = output_path.map(PathBuf::from).unwrap_or_else(|| PathBuf::from(&source_path).with_extension(""));
-        match std::fs::read_to_string(&source_path).map_err(|error| error.to_string()).and_then(|source| basisread::compile_source(&source, &output_path, include_str!("lib.rs"), include_str!("lexer.rs"), include_str!("parser.rs")).map_err(|error| error.to_string())) {
+        match std::fs::read_to_string(&source_path).map_err(|error| error.to_string()).and_then(|source| basisread::compile_source(&source, &output_path, include_str!("lib.rs"), include_str!("lexer.rs"), include_str!("parser.rs"), include_str!("codegen.rs")).map_err(|error| error.to_string())) {
             Ok(()) => println!("built {}", output_path.display()),
             Err(error) => {
                 eprintln!("BASISREAD build error: {error}");
