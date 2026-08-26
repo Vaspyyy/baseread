@@ -42,7 +42,7 @@ pub enum Statement {
     Set { name: String, value: Expression },
     Say(Expression),
     Run { application: String },
-    When { condition: Condition, body: Vec<Statement> },
+    When { condition: Condition, body: Vec<Statement>, otherwise: Option<Vec<Statement>> },
     Repeat { count: Expression, body: Vec<Statement> },
     While { condition: Condition, body: Vec<Statement> },
     ForEach { name: String, iterable: Expression, body: Vec<Statement> },
@@ -101,11 +101,11 @@ pub fn parse(source: &str) -> Result<Program, BasisError> {
         .filter(|(_, line)| !line.is_empty() && !line.starts_with('#'))
         .collect();
     let mut cursor = 0;
-    let statements = parse_block(&lines, &mut cursor, false)?;
+    let (statements, _) = parse_block(&lines, &mut cursor, false, false)?;
     Ok(Program { statements })
 }
 
-fn parse_block(lines: &[(usize, &str)], cursor: &mut usize, nested: bool) -> Result<Vec<Statement>, BasisError> {
+fn parse_block(lines: &[(usize, &str)], cursor: &mut usize, nested: bool, stop_at_otherwise: bool) -> Result<(Vec<Statement>, bool), BasisError> {
     let mut statements = Vec::new();
     while *cursor < lines.len() {
         let (line_number, line) = lines[*cursor];
@@ -114,7 +114,14 @@ fn parse_block(lines: &[(usize, &str)], cursor: &mut usize, nested: bool) -> Res
                 return Err(BasisError::new(line_number, "unexpected end"));
             }
             *cursor += 1;
-            return Ok(statements);
+            return Ok((statements, false));
+        }
+        if line == "otherwise, do" {
+            if !stop_at_otherwise {
+                return Err(BasisError::new(line_number, "`otherwise` must belong to a `when` block"));
+            }
+            *cursor += 1;
+            return Ok((statements, true));
         }
         if let Some(rest) = line.strip_prefix("set ") {
             let (name, expression) = rest.split_once(" to ").ok_or_else(|| BasisError::new(line_number, "expected `set name to value`"))?;
@@ -134,26 +141,32 @@ fn parse_block(lines: &[(usize, &str)], cursor: &mut usize, nested: bool) -> Res
             let (condition, marker) = rest.split_once(", do").ok_or_else(|| BasisError::new(line_number, "expected `when condition, do`"))?;
             if !marker.trim().is_empty() { return Err(BasisError::new(line_number, "unexpected text after `do`")); }
             *cursor += 1;
-            let body = parse_block(lines, cursor, true)?;
-            statements.push(Statement::When { condition: parse_condition(condition, line_number)?, body });
+            let (body, has_otherwise) = parse_block(lines, cursor, true, true)?;
+            let otherwise = if has_otherwise {
+                let (otherwise, _) = parse_block(lines, cursor, true, false)?;
+                Some(otherwise)
+            } else {
+                None
+            };
+            statements.push(Statement::When { condition: parse_condition(condition, line_number)?, body, otherwise });
         } else if let Some(rest) = line.strip_prefix("repeat ") {
             let (count, marker) = rest.split_once(" times, do").ok_or_else(|| BasisError::new(line_number, "expected `repeat count times, do`"))?;
             if !marker.trim().is_empty() { return Err(BasisError::new(line_number, "unexpected text after `do`")); }
             *cursor += 1;
-            let body = parse_block(lines, cursor, true)?;
+            let (body, _) = parse_block(lines, cursor, true, false)?;
             statements.push(Statement::Repeat { count: parse_expression(count, line_number)?, body });
         } else if let Some(rest) = line.strip_prefix("while ") {
             let (condition, marker) = rest.split_once(", do").ok_or_else(|| BasisError::new(line_number, "expected `while condition, do`"))?;
             if !marker.trim().is_empty() { return Err(BasisError::new(line_number, "unexpected text after `do`")); }
             *cursor += 1;
-            let body = parse_block(lines, cursor, true)?;
+            let (body, _) = parse_block(lines, cursor, true, false)?;
             statements.push(Statement::While { condition: parse_condition(condition, line_number)?, body });
         } else if let Some(rest) = line.strip_prefix("for each ") {
             let (name, rest) = rest.split_once(" in ").ok_or_else(|| BasisError::new(line_number, "expected `for each item in collection, do`"))?;
             let (iterable, marker) = rest.split_once(", do").ok_or_else(|| BasisError::new(line_number, "expected `for each item in collection, do`"))?;
             if !marker.trim().is_empty() { return Err(BasisError::new(line_number, "unexpected text after `do`")); }
             *cursor += 1;
-            let body = parse_block(lines, cursor, true)?;
+            let (body, _) = parse_block(lines, cursor, true, false)?;
             statements.push(Statement::ForEach { name: name.trim().to_string(), iterable: parse_expression(iterable, line_number)?, body });
         } else if let Some(rest) = line.strip_prefix("return ") {
             statements.push(Statement::Return(parse_expression(rest, line_number)?));
@@ -164,7 +177,7 @@ fn parse_block(lines: &[(usize, &str)], cursor: &mut usize, nested: bool) -> Res
             let parameters = if args.trim().is_empty() { Vec::new() } else { args.split(',').map(|arg| arg.trim().to_string()).collect() };
             if marker.trim() != "" { return Err(BasisError::new(line_number, "unexpected text after `do`")); }
             *cursor += 1;
-            let body = parse_block(lines, cursor, true)?;
+            let (body, _) = parse_block(lines, cursor, true, false)?;
             statements.push(Statement::Define { name: name.trim().to_string(), parameters, body });
         } else {
             statements.push(Statement::Expression(parse_expression(line, line_number)?));
@@ -172,7 +185,7 @@ fn parse_block(lines: &[(usize, &str)], cursor: &mut usize, nested: bool) -> Res
         }
     }
     if nested { return Err(BasisError::new(lines.last().map(|line| line.0).unwrap_or(1), "missing `end`")); }
-    Ok(statements)
+    Ok((statements, false))
 }
 
 fn parse_expression(source: &str, line: usize) -> Result<Expression, BasisError> {
@@ -308,9 +321,11 @@ fn execute_block(statements: &[Statement], environment: &mut Environment, output
                 output.push(value.to_string());
             }
             Statement::Run { application } => { launch_application(application)?; }
-            Statement::When { condition, body } => {
+            Statement::When { condition, body, otherwise } => {
                 if evaluate_condition(condition, environment, output)? {
                     if let Some(value) = execute_block(body, environment, output, line)? { return Ok(Some(value)); }
+                } else if let Some(otherwise) = otherwise {
+                    if let Some(value) = execute_block(otherwise, environment, output, line)? { return Ok(Some(value)); }
                 }
             }
             Statement::Repeat { count, body } => {
@@ -631,6 +646,11 @@ mod tests {
             when score is greater than 3, do
                 say "high enough"
             end
+            when score is less than 3, do
+                say "wrong branch"
+            otherwise, do
+                say "otherwise branch"
+            end
             repeat 2 times, do
                 say "again"
             end
@@ -638,7 +658,7 @@ mod tests {
                 say "never"
             end
         "#;
-        assert_eq!(run(&parse(source).unwrap()).unwrap(), vec!["correct", "high enough", "again", "again"]);
+        assert_eq!(run(&parse(source).unwrap()).unwrap(), vec!["correct", "high enough", "otherwise branch", "again", "again"]);
     }
 
     #[test]
