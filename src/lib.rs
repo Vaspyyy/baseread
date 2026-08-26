@@ -112,12 +112,17 @@ pub enum Condition {
 #[derive(Debug)]
 pub struct BasisError {
     pub line: usize,
+    pub column: usize,
     pub message: String,
 }
 
 impl BasisError {
     fn new(line: usize, message: impl Into<String>) -> Self {
-        Self { line, message: message.into() }
+        Self { line, column: 0, message: message.into() }
+    }
+
+    fn at(line: usize, column: usize, message: impl Into<String>) -> Self {
+        Self { line, column, message: message.into() }
     }
 }
 
@@ -125,8 +130,10 @@ impl fmt::Display for BasisError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.line == 0 {
             write!(f, "{}", self.message)
-        } else {
+        } else if self.column == 0 {
             write!(f, "line {}: {}", self.line, self.message)
+        } else {
+            write!(f, "line {}, column {}: {}", self.line, self.column, self.message)
         }
     }
 }
