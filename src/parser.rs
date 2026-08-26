@@ -473,7 +473,8 @@ impl Parser {
     }
 
     fn find_first_phrase(&self, start: usize, end: usize, phrase: &[&str]) -> Option<usize> {
-        self.find_boundary(start, end, Boundary::Phrase(phrase))
+        let index = self.find_boundary(start, end, Boundary::Phrase(phrase));
+        (index < end).then_some(index)
     }
 
     fn find_first_comma(&self, start: usize, end: usize) -> Option<usize> {
