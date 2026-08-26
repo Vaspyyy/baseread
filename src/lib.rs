@@ -305,7 +305,7 @@ fn application_match_score(query: &str, entry: &DesktopEntry) -> Option<usize> {
 }
 
 fn normalize_application_name(name: &str) -> String {
-    name.chars().filter(|character| character.is_alphanumeric()).flat_map(char::to_lowercase).collect()
+    name.chars().filter(|character| character.is_alphanumeric()).flat_map(|character| character.to_lowercase()).collect()
 }
 
 fn levenshtein(left: &str, right: &str) -> usize {
