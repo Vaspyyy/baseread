@@ -227,7 +227,7 @@ fn parse_block(lines: &[(usize, &str)], cursor: &mut usize, nested: bool, stop_a
             statements.push(Statement::Skip);
             *cursor += 1;
         } else if let Some(rest) = line.strip_prefix("when ") {
-            let (condition, marker) = rest.split_once(", do").ok_or_else(|| BasisError::new(line_number, "expected `when condition, do`"))?;
+            let (condition, marker) = split_phrase(rest, ", do").ok_or_else(|| BasisError::new(line_number, "expected `when condition, do`"))?;
             if !marker.trim().is_empty() { return Err(BasisError::new(line_number, "unexpected text after `do`")); }
             *cursor += 1;
             let (body, has_otherwise) = parse_block(lines, cursor, true, true)?;
@@ -239,20 +239,20 @@ fn parse_block(lines: &[(usize, &str)], cursor: &mut usize, nested: bool, stop_a
             };
             statements.push(Statement::When { condition: parse_condition(condition, line_number)?, body, otherwise });
         } else if let Some(rest) = line.strip_prefix("repeat ") {
-            let (count, marker) = rest.split_once(" times, do").ok_or_else(|| BasisError::new(line_number, "expected `repeat count times, do`"))?;
+            let (count, marker) = split_phrase(rest, " times, do").ok_or_else(|| BasisError::new(line_number, "expected `repeat count times, do`"))?;
             if !marker.trim().is_empty() { return Err(BasisError::new(line_number, "unexpected text after `do`")); }
             *cursor += 1;
             let (body, _) = parse_block(lines, cursor, true, false)?;
             statements.push(Statement::Repeat { count: parse_expression(count, line_number)?, body });
         } else if let Some(rest) = line.strip_prefix("while ") {
-            let (condition, marker) = rest.split_once(", do").ok_or_else(|| BasisError::new(line_number, "expected `while condition, do`"))?;
+            let (condition, marker) = split_phrase(rest, ", do").ok_or_else(|| BasisError::new(line_number, "expected `while condition, do`"))?;
             if !marker.trim().is_empty() { return Err(BasisError::new(line_number, "unexpected text after `do`")); }
             *cursor += 1;
             let (body, _) = parse_block(lines, cursor, true, false)?;
             statements.push(Statement::While { condition: parse_condition(condition, line_number)?, body });
         } else if let Some(rest) = line.strip_prefix("for each ") {
-            let (name, rest) = rest.split_once(" in ").ok_or_else(|| BasisError::new(line_number, "expected `for each item in collection, do`"))?;
-            let (iterable, marker) = rest.split_once(", do").ok_or_else(|| BasisError::new(line_number, "expected `for each item in collection, do`"))?;
+            let (name, rest) = split_phrase(rest, " in ").ok_or_else(|| BasisError::new(line_number, "expected `for each item in collection, do`"))?;
+            let (iterable, marker) = split_phrase(rest, ", do").ok_or_else(|| BasisError::new(line_number, "expected `for each item in collection, do`"))?;
             if !marker.trim().is_empty() { return Err(BasisError::new(line_number, "unexpected text after `do`")); }
             *cursor += 1;
             let (body, _) = parse_block(lines, cursor, true, false)?;
@@ -261,8 +261,8 @@ fn parse_block(lines: &[(usize, &str)], cursor: &mut usize, nested: bool, stop_a
             statements.push(Statement::Return(parse_expression(rest, line_number)?));
             *cursor += 1;
         } else if let Some(rest) = line.strip_prefix("define ") {
-            let (header, marker) = rest.split_once(", do").ok_or_else(|| BasisError::new(line_number, "expected `define name using arguments, do`"))?;
-            let (name, args) = header.split_once(" using ").unwrap_or((header, ""));
+            let (header, marker) = split_phrase(rest, ", do").ok_or_else(|| BasisError::new(line_number, "expected `define name using arguments, do`"))?;
+            let (name, args) = split_phrase(header, " using ").unwrap_or((header, ""));
             let parameters = if args.trim().is_empty() { Vec::new() } else { args.split(',').map(|arg| arg.trim().to_string()).collect() };
             if marker.trim() != "" { return Err(BasisError::new(line_number, "unexpected text after `do`")); }
             *cursor += 1;
@@ -336,7 +336,7 @@ fn parse_expression(source: &str, line: usize) -> Result<Expression, BasisError>
         let values = split_top_level(contents, ',').into_iter().filter(|value| !value.trim().is_empty()).map(|value| parse_expression(value, line)).collect::<Result<_, _>>()?;
         return Ok(Expression::List(values));
     }
-    if let Some((name, args)) = source.split_once(" using ") {
+    if let Some((name, args)) = split_phrase(source, " using ") {
         let arguments = if args.trim().is_empty() { Vec::new() } else { args.split(',').map(|arg| parse_expression(arg, line)).collect::<Result<_, _>>()? };
         return Ok(Expression::Call { name: name.trim().to_string(), arguments });
     }
@@ -1143,6 +1143,9 @@ mod tests {
             when "this is text" is "this is text", do
                 say "quoted condition"
             end
+            when "a, do" is "a, do", do
+                say "quoted delimiter"
+            end
             set names to ["Ada", "Grace"]
             when names contains "Ada", do
                 say "list contains"
@@ -1159,7 +1162,7 @@ mod tests {
                 say "never"
             end
         "#;
-        assert_eq!(run(&parse(source).unwrap()).unwrap(), vec!["correct", "high enough", "combined", "archive", "contains", "quoted condition", "list contains", "otherwise branch", "again", "again"]);
+        assert_eq!(run(&parse(source).unwrap()).unwrap(), vec!["correct", "high enough", "combined", "archive", "contains", "quoted condition", "quoted delimiter", "list contains", "otherwise branch", "again", "again"]);
     }
 
     #[test]
