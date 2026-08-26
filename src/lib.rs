@@ -89,6 +89,9 @@ pub enum Condition {
     Not(Box<Condition>),
     And(Box<Condition>, Box<Condition>),
     Or(Box<Condition>, Box<Condition>),
+    Contains(Expression, Expression),
+    StartsWith(Expression, Expression),
+    EndsWith(Expression, Expression),
     Equals(Expression, Expression),
     NotEquals(Expression, Expression),
     GreaterThan(Expression, Expression),
@@ -327,6 +330,15 @@ fn parse_condition(source: &str, line: usize) -> Result<Condition, BasisError> {
     }
     if let Some(source) = source.strip_prefix("not ") {
         return Ok(Condition::Not(Box::new(parse_condition(source, line)?)));
+    }
+    if let Some((left, right)) = split_phrase(source, " contains ") {
+        return Ok(Condition::Contains(parse_expression(left, line)?, parse_expression(right, line)?));
+    }
+    if let Some((left, right)) = split_phrase(source, " starts with ") {
+        return Ok(Condition::StartsWith(parse_expression(left, line)?, parse_expression(right, line)?));
+    }
+    if let Some((left, right)) = split_phrase(source, " ends with ") {
+        return Ok(Condition::EndsWith(parse_expression(left, line)?, parse_expression(right, line)?));
     }
     if let Some((left, right)) = source.split_once(" is not ") {
         return Ok(Condition::NotEquals(parse_expression(left, line)?, parse_expression(right, line)?));
@@ -689,11 +701,31 @@ fn evaluate_condition(condition: &Condition, environment: &mut Environment, outp
         Condition::Not(condition) => Ok(!evaluate_condition(condition, environment, output)?),
         Condition::And(left, right) => Ok(evaluate_condition(left, environment, output)? && evaluate_condition(right, environment, output)?),
         Condition::Or(left, right) => Ok(evaluate_condition(left, environment, output)? || evaluate_condition(right, environment, output)?),
+        Condition::Contains(left, right) => contains_value(evaluate(left, environment, output)?, evaluate(right, environment, output)?),
+        Condition::StartsWith(left, right) => string_predicate(left, right, environment, output, |left, right| left.starts_with(right)),
+        Condition::EndsWith(left, right) => string_predicate(left, right, environment, output, |left, right| left.ends_with(right)),
         Condition::Equals(left, right) => Ok(evaluate(left, environment, output)? == evaluate(right, environment, output)?),
         Condition::NotEquals(left, right) => Ok(evaluate(left, environment, output)? != evaluate(right, environment, output)?),
         Condition::GreaterThan(left, right) => compare_values(left, right, environment, output, |ordering| ordering.is_gt()),
         Condition::LessThan(left, right) => compare_values(left, right, environment, output, |ordering| ordering.is_lt()),
     }
+}
+
+fn contains_value(left: Value, right: Value) -> Result<bool, BasisError> {
+    match (left, right) {
+        (Value::Text(left), Value::Text(right)) => Ok(left.contains(&right)),
+        (Value::List(values), right) => Ok(values.contains(&right)),
+        _ => Err(BasisError::new(0, "contains requires text or a list")),
+    }
+}
+
+fn string_predicate<F>(left: &Expression, right: &Expression, environment: &mut Environment, output: &mut Vec<String>, predicate: F) -> Result<bool, BasisError>
+where
+    F: Fn(&str, &str) -> bool,
+{
+    let left = value_as_text(left, environment, output)?;
+    let right = value_as_text(right, environment, output)?;
+    Ok(predicate(&left, &right))
 }
 
 fn is_truthy(value: &Value) -> bool {
@@ -974,6 +1006,17 @@ mod tests {
             when score is 5 and not score is 4, do
                 say "combined"
             end
+            set filename to "backup.tar"
+            when filename ends with ".tar", do
+                say "archive"
+            end
+            when "BASISREAD" contains "READ", do
+                say "contains"
+            end
+            set names to ["Ada", "Grace"]
+            when names contains "Ada", do
+                say "list contains"
+            end
             when score is less than 3, do
                 say "wrong branch"
             otherwise, do
@@ -986,7 +1029,7 @@ mod tests {
                 say "never"
             end
         "#;
-        assert_eq!(run(&parse(source).unwrap()).unwrap(), vec!["correct", "high enough", "combined", "otherwise branch", "again", "again"]);
+        assert_eq!(run(&parse(source).unwrap()).unwrap(), vec!["correct", "high enough", "combined", "archive", "contains", "list contains", "otherwise branch", "again", "again"]);
     }
 
     #[test]
