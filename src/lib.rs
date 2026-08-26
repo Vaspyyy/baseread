@@ -52,6 +52,7 @@ pub enum Statement {
     WriteFile { content: Expression, path: Expression },
     Shell(Expression),
     OpenFile(Expression),
+    Include(Expression),
     Stop,
     Skip,
     When { condition: Condition, body: Vec<Statement>, otherwise: Option<Vec<Statement>> },
@@ -202,6 +203,9 @@ fn parse_block(lines: &[(usize, &str)], cursor: &mut usize, nested: bool, stop_a
             *cursor += 1;
         } else if let Some(path) = line.strip_prefix("open file ") {
             statements.push(Statement::OpenFile(parse_expression(path, line_number)?));
+            *cursor += 1;
+        } else if let Some(path) = line.strip_prefix("include ") {
+            statements.push(Statement::Include(parse_expression(path, line_number)?));
             *cursor += 1;
         } else if line == "stop" {
             statements.push(Statement::Stop);
@@ -511,6 +515,13 @@ fn execute_block(statements: &[Statement], environment: &mut Environment, output
             Statement::OpenFile(path) => {
                 let path = value_as_path(path, environment, output)?;
                 open_file(path)?;
+            }
+            Statement::Include(path) => {
+                let path = value_as_path(path, environment, output)?;
+                let source = fs::read_to_string(&path).map_err(|error| BasisError::new(0, format!("could not include `{}`: {error}", path.display())))?;
+                let program = parse(&source)?;
+                let flow = execute_block(&program.statements, environment, output, line)?;
+                if !matches!(&flow, Flow::Next) { return Ok(flow); }
             }
             Statement::Stop => return Ok(Flow::Break),
             Statement::Skip => return Ok(Flow::Continue),
@@ -1133,6 +1144,16 @@ mod tests {
             say hello
         "#;
         assert_eq!(run(&parse(source).unwrap()).unwrap(), vec!["Hello"]);
+    }
+
+    #[test]
+    fn includes_code_in_the_current_environment() {
+        let suffix = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let path = std::env::temp_dir().join(format!("basisread-helper-{suffix}.basis"));
+        fs::write(&path, "define greet using person, do\n return \"Hello, \" joined with person\nend\n").unwrap();
+        let source = format!("include \"{}\"\nsay greet using \"Ransom\"", path.display());
+        assert_eq!(run(&parse(&source).unwrap()).unwrap(), vec!["Hello, Ransom"]);
+        fs::remove_file(path).unwrap();
     }
 
     #[test]
