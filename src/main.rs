@@ -10,7 +10,7 @@ fn main() {
     };
 
     if first == "--version" {
-        println!("BASISREAD 0.1.0");
+        println!("BASISREAD 0.2.0");
         return;
     }
 
@@ -71,7 +71,7 @@ fn main() {
 }
 
 fn repl() {
-    println!("BASISREAD 0.1.0");
+    println!("BASISREAD 0.2.0");
     println!("Type `exit` to leave.");
     let stdin = io::stdin();
     let mut input = stdin.lock();
