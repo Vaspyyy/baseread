@@ -1,0 +1,9 @@
+set player to {
+    health: 20,
+    inventory: []
+}
+
+set player.health to player.health plus 1
+add "torch" to player.inventory
+say "Health: {player.health}"
+say length of player.inventory
