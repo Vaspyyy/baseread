@@ -42,6 +42,14 @@ pub enum Statement {
     Set { name: String, value: Expression },
     Say(Expression),
     Run { application: String },
+    CreateFolder(Expression),
+    Copy { source: Expression, destination: Expression },
+    Move { source: Expression, destination: Expression },
+    DeleteFile(Expression),
+    DeleteFolder(Expression),
+    WriteFile { content: Expression, path: Expression },
+    Shell(Expression),
+    OpenFile(Expression),
     When { condition: Condition, body: Vec<Statement>, otherwise: Option<Vec<Statement>> },
     Repeat { count: Expression, body: Vec<Statement> },
     While { condition: Condition, body: Vec<Statement> },
@@ -56,6 +64,7 @@ pub enum Expression {
     Literal(Value),
     Variable(String),
     List(Vec<Expression>),
+    ReadFile(Box<Expression>),
     Add(Box<Expression>, Box<Expression>),
     Subtract(Box<Expression>, Box<Expression>),
     Multiply(Box<Expression>, Box<Expression>),
@@ -137,6 +146,33 @@ fn parse_block(lines: &[(usize, &str)], cursor: &mut usize, nested: bool, stop_a
             }
             statements.push(Statement::Run { application: application.to_string() });
             *cursor += 1;
+        } else if let Some(path) = line.strip_prefix("create folder ") {
+            statements.push(Statement::CreateFolder(parse_expression(path, line_number)?));
+            *cursor += 1;
+        } else if let Some(rest) = line.strip_prefix("copy ") {
+            let (source, destination) = split_phrase(rest, " to ").ok_or_else(|| BasisError::new(line_number, "expected `copy source to destination`"))?;
+            statements.push(Statement::Copy { source: parse_expression(source, line_number)?, destination: parse_expression(destination, line_number)? });
+            *cursor += 1;
+        } else if let Some(rest) = line.strip_prefix("move ") {
+            let (source, destination) = split_phrase(rest, " to ").ok_or_else(|| BasisError::new(line_number, "expected `move source to destination`"))?;
+            statements.push(Statement::Move { source: parse_expression(source, line_number)?, destination: parse_expression(destination, line_number)? });
+            *cursor += 1;
+        } else if let Some(path) = line.strip_prefix("delete file ") {
+            statements.push(Statement::DeleteFile(parse_expression(path, line_number)?));
+            *cursor += 1;
+        } else if let Some(path) = line.strip_prefix("delete folder ") {
+            statements.push(Statement::DeleteFolder(parse_expression(path, line_number)?));
+            *cursor += 1;
+        } else if let Some(rest) = line.strip_prefix("write ") {
+            let (content, path) = split_phrase(rest, " to file ").ok_or_else(|| BasisError::new(line_number, "expected `write content to file path`"))?;
+            statements.push(Statement::WriteFile { content: parse_expression(content, line_number)?, path: parse_expression(path, line_number)? });
+            *cursor += 1;
+        } else if let Some(command) = line.strip_prefix("shell ") {
+            statements.push(Statement::Shell(parse_expression(command, line_number)?));
+            *cursor += 1;
+        } else if let Some(path) = line.strip_prefix("open file ") {
+            statements.push(Statement::OpenFile(parse_expression(path, line_number)?));
+            *cursor += 1;
         } else if let Some(rest) = line.strip_prefix("when ") {
             let (condition, marker) = rest.split_once(", do").ok_or_else(|| BasisError::new(line_number, "expected `when condition, do`"))?;
             if !marker.trim().is_empty() { return Err(BasisError::new(line_number, "unexpected text after `do`")); }
@@ -212,6 +248,9 @@ fn parse_expression(source: &str, line: usize) -> Result<Expression, BasisError>
     if source == "false" { return Ok(Expression::Literal(Value::Boolean(false))); }
     if source == "nothing" { return Ok(Expression::Literal(Value::Nothing)); }
     if let Ok(number) = source.parse::<f64>() { return Ok(Expression::Literal(Value::Number(number))); }
+    if let Some(path) = source.strip_prefix("read file ") {
+        return Ok(Expression::ReadFile(Box::new(parse_expression(path, line)?)));
+    }
     if source.starts_with('[') && source.ends_with(']') && source.len() >= 2 {
         let contents = &source[1..source.len() - 1];
         let values = split_top_level(contents, ',').into_iter().filter(|value| !value.trim().is_empty()).map(|value| parse_expression(value, line)).collect::<Result<_, _>>()?;
@@ -321,6 +360,40 @@ fn execute_block(statements: &[Statement], environment: &mut Environment, output
                 output.push(value.to_string());
             }
             Statement::Run { application } => { launch_application(application)?; }
+            Statement::CreateFolder(path) => {
+                fs::create_dir_all(value_as_text(path, environment, output)?).map_err(|error| BasisError::new(0, format!("could not create folder: {error}")))?;
+            }
+            Statement::Copy { source, destination } => {
+                let source = value_as_text(source, environment, output)?;
+                let destination = value_as_text(destination, environment, output)?;
+                fs::copy(&source, &destination).map_err(|error| BasisError::new(0, format!("could not copy `{source}` to `{destination}`: {error}")))?;
+            }
+            Statement::Move { source, destination } => {
+                let source = value_as_text(source, environment, output)?;
+                let destination = value_as_text(destination, environment, output)?;
+                fs::rename(&source, &destination).map_err(|error| BasisError::new(0, format!("could not move `{source}` to `{destination}`: {error}")))?;
+            }
+            Statement::DeleteFile(path) => {
+                let path = value_as_text(path, environment, output)?;
+                fs::remove_file(&path).map_err(|error| BasisError::new(0, format!("could not delete file `{path}`: {error}")))?;
+            }
+            Statement::DeleteFolder(path) => {
+                let path = value_as_text(path, environment, output)?;
+                fs::remove_dir_all(&path).map_err(|error| BasisError::new(0, format!("could not delete folder `{path}`: {error}")))?;
+            }
+            Statement::WriteFile { content, path } => {
+                let content = value_as_text(content, environment, output)?;
+                let path = value_as_text(path, environment, output)?;
+                fs::write(&path, content).map_err(|error| BasisError::new(0, format!("could not write file `{path}`: {error}")))?;
+            }
+            Statement::Shell(command) => {
+                let command = value_as_text(command, environment, output)?;
+                run_shell(command, output)?;
+            }
+            Statement::OpenFile(path) => {
+                let path = value_as_text(path, environment, output)?;
+                open_file(path)?;
+            }
             Statement::When { condition, body, otherwise } => {
                 if evaluate_condition(condition, environment, output)? {
                     if let Some(value) = execute_block(body, environment, output, line)? { return Ok(Some(value)); }
@@ -363,6 +436,10 @@ fn evaluate(expression: &Expression, environment: &mut Environment, output: &mut
         Expression::Literal(value) => Ok(value.clone()),
         Expression::Variable(name) => environment.variables.get(name).cloned().ok_or_else(|| BasisError::new(0, format!("unknown variable `{name}`"))),
         Expression::List(expressions) => Ok(Value::List(expressions.iter().map(|expression| evaluate(expression, environment, output)).collect::<Result<_, _>>()?)),
+        Expression::ReadFile(path) => {
+            let path = value_as_text(path, environment, output)?;
+            Ok(Value::Text(fs::read_to_string(&path).map_err(|error| BasisError::new(0, format!("could not read file `{path}`: {error}")))?))
+        }
         Expression::Add(left, right) => numeric_operation(left, right, environment, output, |left, right| left + right),
         Expression::Subtract(left, right) => numeric_operation(left, right, environment, output, |left, right| left - right),
         Expression::Multiply(left, right) => numeric_operation(left, right, environment, output, |left, right| left * right),
@@ -383,6 +460,29 @@ fn evaluate(expression: &Expression, environment: &mut Environment, output: &mut
             Ok(execute_block(&function.body, &mut local, output, 0)?.unwrap_or(Value::Nothing))
         }
     }
+}
+
+fn value_as_text(expression: &Expression, environment: &mut Environment, output: &mut Vec<String>) -> Result<String, BasisError> {
+    match evaluate(expression, environment, output)? {
+        Value::Text(value) => Ok(value),
+        value => Err(BasisError::new(0, format!("expected text, got {value}"))),
+    }
+}
+
+fn run_shell(command: String, output: &mut Vec<String>) -> Result<(), BasisError> {
+    let result = Command::new("sh").arg("-c").arg(&command).output().map_err(|error| BasisError::new(0, format!("could not run shell command: {error}")))?;
+    output.extend(String::from_utf8_lossy(&result.stdout).lines().map(str::to_string));
+    if !result.status.success() {
+        let error = String::from_utf8_lossy(&result.stderr).trim().to_string();
+        let detail = if error.is_empty() { format!("exit status {}", result.status) } else { error };
+        return Err(BasisError::new(0, format!("shell command failed: {detail}")));
+    }
+    Ok(())
+}
+
+fn open_file(path: String) -> Result<(), BasisError> {
+    Command::new("xdg-open").arg(&path).spawn().map_err(|error| BasisError::new(0, format!("could not open `{path}`: {error}")))?;
+    Ok(())
 }
 
 fn numeric_operation<F>(left: &Expression, right: &Expression, environment: &mut Environment, output: &mut Vec<String>, operation: F) -> Result<Value, BasisError>
@@ -601,6 +701,7 @@ fn parse_exec(exec: &str) -> Result<Vec<String>, BasisError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn runs_variables_and_output() {
@@ -683,5 +784,19 @@ mod tests {
             say 1 plus 2 times 3
         "#;
         assert_eq!(run(&parse(source).unwrap()).unwrap(), vec!["0", "1", "2", "7"]);
+    }
+
+    #[test]
+    fn automates_files_and_shell_commands() {
+        let suffix = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let root = std::env::temp_dir().join(format!("basisread-{suffix}"));
+        let input = root.join("input.txt");
+        let copy = root.join("copy.txt");
+        let source = format!(
+            "create folder \"{}\"\nwrite \"hello\" to file \"{}\"\ncopy \"{}\" to \"{}\"\nsay read file \"{}\"\nshell \"printf shell\"\ndelete folder \"{}\"",
+            root.display(), input.display(), input.display(), copy.display(), copy.display(), root.display()
+        );
+        assert_eq!(run(&parse(&source).unwrap()).unwrap(), vec!["hello", "shell"]);
+        assert!(!root.exists());
     }
 }
