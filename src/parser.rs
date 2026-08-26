@@ -419,6 +419,10 @@ impl Parser {
     }
 
     fn parse_expression_range(&self, start: usize, end: usize) -> Result<Expression, BasisError> {
+        let mut start = start;
+        let mut end = end;
+        while start < end && self.token_is(start, TokenKind::Newline) { start += 1; }
+        while end > start && self.token_is(end - 1, TokenKind::Newline) { end -= 1; }
         if start >= end {
             return Err(self.error_at(start, "expected an expression"));
         }
