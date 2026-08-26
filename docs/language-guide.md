@@ -114,6 +114,7 @@ an expression by its name.
 ```basisread
 set action to ask "Explore, rest, or inventory? "
 set key to ask key
+say key available
 set roll to random integer from 1 to 6
 set chance to random number from 0 to 1
 set direction to random choice from ["north", "south", "east", "west"]
@@ -157,6 +158,10 @@ wait 0.5 seconds
 Colors include black, red, green, yellow, blue, magenta, cyan, white, gray,
 and their bright variants. ANSI controls are emitted during interactive runs;
 buffered library runs keep their output plain.
+
+`ask key` waits for one key without requiring Enter. `key available` checks
+without waiting, so a game can poll input before deciding whether to update.
+When it reports `true`, the key remains queued for the next `ask key`.
 
 For flicker-free ASCII interfaces, draw into the reusable screen buffer and
 render it in one operation:
