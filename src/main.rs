@@ -29,6 +29,25 @@ fn main() {
         return;
     }
 
+    if first == "--tokens" {
+        let Some(path) = arguments.next() else {
+            eprintln!("usage: basisread --tokens <file.basis>");
+            std::process::exit(2);
+        };
+        match std::fs::read_to_string(&path).map_err(|error| error.to_string()).and_then(|source| basisread::lex(&source).map_err(|error| error.to_string())) {
+            Ok(tokens) => {
+                for token in tokens {
+                    println!("{}:{} {:?}", token.span.line, token.span.column, token.kind);
+                }
+            }
+            Err(error) => {
+                eprintln!("BASISREAD lexer error: {error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     if first == "build" || first == "compile" {
         let Some(source_path) = arguments.next() else {
             eprintln!("usage: basisread build <file.basis> [-o output]");
@@ -55,7 +74,7 @@ fn main() {
     }
 
     if arguments.next().is_some() {
-        eprintln!("usage: basisread [--version | --check <file.basis> | build <file.basis> [-o output] | <file.basis>]");
+        eprintln!("usage: basisread [--version | --check <file.basis> | --tokens <file.basis> | build <file.basis> [-o output] | <file.basis>]");
         std::process::exit(2);
     }
 
