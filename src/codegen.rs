@@ -38,6 +38,7 @@ fn statement_literal(statement: &Statement) -> String {
         Statement::Wait(seconds) => format!("basisread::Statement::Wait({})", expression_literal(seconds)),
         Statement::ClearTerminal => "basisread::Statement::ClearTerminal".to_string(),
         Statement::DrawText { text, x, y } => format!("basisread::Statement::DrawText {{ text: {}, x: {}, y: {} }}", expression_literal(text), expression_literal(x), expression_literal(y)),
+        Statement::DrawTextColored { text, x, y, color } => format!("basisread::Statement::DrawTextColored {{ text: {}, x: {}, y: {}, color: String::from({color:?}) }}", expression_literal(text), expression_literal(x), expression_literal(y)),
         Statement::ClearScreenBuffer => "basisread::Statement::ClearScreenBuffer".to_string(),
         Statement::RenderScreen => "basisread::Statement::RenderScreen".to_string(),
         Statement::ResizeScreen { width, height } => format!("basisread::Statement::ResizeScreen {{ width: {}, height: {} }}", expression_literal(width), expression_literal(height)),
