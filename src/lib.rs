@@ -41,7 +41,7 @@ pub struct Program {
 pub enum Statement {
     Set { name: String, value: Expression },
     Say(Expression),
-    Run { application: String },
+    Run { application: String, arguments: Vec<Expression> },
     CreateFolder(Expression),
     Copy { source: Expression, destination: Expression },
     Move { source: Expression, destination: Expression },
@@ -153,11 +153,16 @@ fn parse_block(lines: &[(usize, &str)], cursor: &mut usize, nested: bool, stop_a
             statements.push(Statement::Say(parse_expression(expression, line_number)?));
             *cursor += 1;
         } else if let Some(application) = line.strip_prefix("run ") {
-            let application = application.trim();
+            let (application, arguments) = if let Some((application, arguments)) = split_phrase(application, " with ") {
+                let arguments = split_top_level(arguments, ',').into_iter().filter(|argument| !argument.trim().is_empty()).map(|argument| parse_expression(argument, line_number)).collect::<Result<_, _>>()?;
+                (application.trim(), arguments)
+            } else {
+                (application.trim(), Vec::new())
+            };
             if application.is_empty() {
                 return Err(BasisError::new(line_number, "expected an application after `run`"));
             }
-            statements.push(Statement::Run { application: application.to_string() });
+            statements.push(Statement::Run { application: application.to_string(), arguments });
             *cursor += 1;
         } else if let Some(path) = line.strip_prefix("create folder ") {
             statements.push(Statement::CreateFolder(parse_expression(path, line_number)?));
@@ -399,7 +404,10 @@ fn execute_block(statements: &[Statement], environment: &mut Environment, output
                 let value = evaluate(expression, environment, output)?;
                 output.push(value.to_string());
             }
-            Statement::Run { application } => { launch_application(application)?; }
+            Statement::Run { application, arguments } => {
+                let arguments = arguments.iter().map(|argument| evaluate(argument, environment, output).map(|value| value.to_string())).collect::<Result<_, _>>()?;
+                launch_application(application, arguments)?;
+            }
             Statement::CreateFolder(path) => {
                 fs::create_dir_all(value_as_text(path, environment, output)?).map_err(|error| BasisError::new(0, format!("could not create folder: {error}")))?;
             }
@@ -749,9 +757,10 @@ fn levenshtein(left: &str, right: &str) -> usize {
     previous[right.len()]
 }
 
-fn launch_application(query: &str) -> Result<(), BasisError> {
+fn launch_application(query: &str, extra_arguments: Vec<String>) -> Result<(), BasisError> {
     let entry = resolve_application(query)?;
-    let command = parse_exec(&entry.exec)?;
+    let mut command = parse_exec(&entry.exec)?;
+    command.extend(extra_arguments);
     let Some((program, arguments)) = command.split_first() else {
         return Err(BasisError::new(0, format!("desktop entry `{}` has an empty Exec command", entry.name)));
     };
@@ -807,8 +816,8 @@ mod tests {
 
     #[test]
     fn parses_desktop_application_commands() {
-        let program = parse("run firefox").unwrap();
-        assert!(matches!(program.statements.as_slice(), [Statement::Run { application }] if application == "firefox"));
+        let program = parse("run firefox with \"--private-window\"").unwrap();
+        assert!(matches!(program.statements.as_slice(), [Statement::Run { application, arguments }] if application == "firefox" && arguments.len() == 1));
     }
 
     #[test]
