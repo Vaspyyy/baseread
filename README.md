@@ -17,4 +17,5 @@ Run the example after installing Rust:
 
 ```sh
 cargo run -- examples/hello.basis
+cargo run -- build examples/hello.basis -o hello
 ```
