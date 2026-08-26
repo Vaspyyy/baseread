@@ -94,6 +94,7 @@ fn expression_literal(expression: &Expression) -> String {
         Expression::LoadFile(value) => format!("basisread::Expression::LoadFile(Box::new({}))", expression_literal(value)),
         Expression::Length(value) => format!("basisread::Expression::Length(Box::new({}))", expression_literal(value)),
         Expression::At(value, index) => format!("basisread::Expression::At(Box::new({}), Box::new({}))", expression_literal(value), expression_literal(index)),
+        Expression::KeyAvailable => "basisread::Expression::KeyAvailable".to_string(),
         Expression::EnvironmentVariable(name) => format!("basisread::Expression::EnvironmentVariable(Box::new({}))", expression_literal(name)),
         Expression::CurrentFolder => "basisread::Expression::CurrentFolder".to_string(),
         Expression::FileExists(path) => format!("basisread::Expression::FileExists(Box::new({}))", expression_literal(path)),
