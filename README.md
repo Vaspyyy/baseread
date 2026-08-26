@@ -11,6 +11,8 @@ create folder "backup"
 copy "notes.txt" to "backup/notes.txt"
 say read file "notes.txt"
 shell "echo finished"
+start shell "long-running-command"
+include "common.basis"
 ```
 
 Run the example after installing Rust:
