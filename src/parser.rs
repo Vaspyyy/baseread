@@ -530,13 +530,13 @@ impl Parser {
         }
 
         if self.token_is(start, TokenKind::LeftBracket) && self.token_is(end - 1, TokenKind::RightBracket) {
-            let values = self.split_ranges(start + 1, end - 1, TokenKind::Comma).into_iter().filter_map(|(left, right)| (left < right).then_some((left, right))).map(|(left, right)| self.parse_expression_range(left, right)).collect::<Result<_, _>>()?;
+            let values = self.split_ranges(start + 1, end - 1, TokenKind::Comma).into_iter().map(|(left, right)| self.trim_newlines(left, right)).filter_map(|(left, right)| (left < right).then_some((left, right))).map(|(left, right)| self.parse_expression_range(left, right)).collect::<Result<_, _>>()?;
             return Ok(Expression::List(values));
         }
 
         if self.token_is(start, TokenKind::LeftBrace) && self.token_is(end - 1, TokenKind::RightBrace) {
             let mut entries = Vec::new();
-            for (left, right) in self.split_ranges(start + 1, end - 1, TokenKind::Comma) {
+            for (left, right) in self.split_ranges(start + 1, end - 1, TokenKind::Comma).into_iter().map(|(left, right)| self.trim_newlines(left, right)) {
                 if left >= right { continue; }
                 let colon = self.find_first_top_level_kind(left, right, TokenKind::Colon).ok_or_else(|| self.error_at(left, "object fields need `key: value`"))?;
                 let key = match &self.tokens[left].kind {
@@ -641,6 +641,12 @@ impl Parser {
             index += 1;
         }
         Ok(path)
+    }
+
+    fn trim_newlines(&self, mut start: usize, mut end: usize) -> (usize, usize) {
+        while start < end && self.token_is(start, TokenKind::Newline) { start += 1; }
+        while end > start && self.token_is(end - 1, TokenKind::Newline) { end -= 1; }
+        (start, end)
     }
 
     fn starts_with_line_phrase(&self, phrase: &[&str]) -> bool {
