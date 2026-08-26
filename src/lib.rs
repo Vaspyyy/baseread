@@ -12,6 +12,7 @@ pub enum Value {
     Text(String),
     Number(f64),
     Boolean(bool),
+    List(Vec<Value>),
     Nothing,
 }
 
@@ -22,6 +23,10 @@ impl fmt::Display for Value {
             Self::Number(value) if value.fract() == 0.0 => write!(f, "{value:.0}"),
             Self::Number(value) => write!(f, "{value}"),
             Self::Boolean(value) => write!(f, "{value}"),
+            Self::List(values) => {
+                let values = values.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ");
+                write!(f, "[{values}]")
+            }
             Self::Nothing => write!(f, "nothing"),
         }
     }
@@ -37,6 +42,10 @@ pub enum Statement {
     Set { name: String, value: Expression },
     Say(Expression),
     Run { application: String },
+    When { condition: Condition, body: Vec<Statement> },
+    Repeat { count: Expression, body: Vec<Statement> },
+    While { condition: Condition, body: Vec<Statement> },
+    ForEach { name: String, iterable: Expression, body: Vec<Statement> },
     Define { name: String, parameters: Vec<String>, body: Vec<Statement> },
     Return(Expression),
     Expression(Expression),
@@ -46,8 +55,18 @@ pub enum Statement {
 pub enum Expression {
     Literal(Value),
     Variable(String),
+    List(Vec<Expression>),
     Join(Box<Expression>, Box<Expression>),
     Call { name: String, arguments: Vec<Expression> },
+}
+
+#[derive(Debug, Clone)]
+pub enum Condition {
+    Truthy(Expression),
+    Equals(Expression, Expression),
+    NotEquals(Expression, Expression),
+    GreaterThan(Expression, Expression),
+    LessThan(Expression, Expression),
 }
 
 #[derive(Debug)]
@@ -107,6 +126,31 @@ fn parse_block(lines: &[(usize, &str)], cursor: &mut usize, nested: bool) -> Res
             }
             statements.push(Statement::Run { application: application.to_string() });
             *cursor += 1;
+        } else if let Some(rest) = line.strip_prefix("when ") {
+            let (condition, marker) = rest.split_once(", do").ok_or_else(|| BasisError::new(line_number, "expected `when condition, do`"))?;
+            if !marker.trim().is_empty() { return Err(BasisError::new(line_number, "unexpected text after `do`")); }
+            *cursor += 1;
+            let body = parse_block(lines, cursor, true)?;
+            statements.push(Statement::When { condition: parse_condition(condition, line_number)?, body });
+        } else if let Some(rest) = line.strip_prefix("repeat ") {
+            let (count, marker) = rest.split_once(" times, do").ok_or_else(|| BasisError::new(line_number, "expected `repeat count times, do`"))?;
+            if !marker.trim().is_empty() { return Err(BasisError::new(line_number, "unexpected text after `do`")); }
+            *cursor += 1;
+            let body = parse_block(lines, cursor, true)?;
+            statements.push(Statement::Repeat { count: parse_expression(count, line_number)?, body });
+        } else if let Some(rest) = line.strip_prefix("while ") {
+            let (condition, marker) = rest.split_once(", do").ok_or_else(|| BasisError::new(line_number, "expected `while condition, do`"))?;
+            if !marker.trim().is_empty() { return Err(BasisError::new(line_number, "unexpected text after `do`")); }
+            *cursor += 1;
+            let body = parse_block(lines, cursor, true)?;
+            statements.push(Statement::While { condition: parse_condition(condition, line_number)?, body });
+        } else if let Some(rest) = line.strip_prefix("for each ") {
+            let (name, rest) = rest.split_once(" in ").ok_or_else(|| BasisError::new(line_number, "expected `for each item in collection, do`"))?;
+            let (iterable, marker) = rest.split_once(", do").ok_or_else(|| BasisError::new(line_number, "expected `for each item in collection, do`"))?;
+            if !marker.trim().is_empty() { return Err(BasisError::new(line_number, "unexpected text after `do`")); }
+            *cursor += 1;
+            let body = parse_block(lines, cursor, true)?;
+            statements.push(Statement::ForEach { name: name.trim().to_string(), iterable: parse_expression(iterable, line_number)?, body });
         } else if let Some(rest) = line.strip_prefix("return ") {
             statements.push(Statement::Return(parse_expression(rest, line_number)?));
             *cursor += 1;
@@ -137,7 +181,13 @@ fn parse_expression(source: &str, line: usize) -> Result<Expression, BasisError>
     }
     if source == "true" { return Ok(Expression::Literal(Value::Boolean(true))); }
     if source == "false" { return Ok(Expression::Literal(Value::Boolean(false))); }
+    if source == "nothing" { return Ok(Expression::Literal(Value::Nothing)); }
     if let Ok(number) = source.parse::<f64>() { return Ok(Expression::Literal(Value::Number(number))); }
+    if source.starts_with('[') && source.ends_with(']') && source.len() >= 2 {
+        let contents = &source[1..source.len() - 1];
+        let values = split_top_level(contents, ',').into_iter().filter(|value| !value.trim().is_empty()).map(|value| parse_expression(value, line)).collect::<Result<_, _>>()?;
+        return Ok(Expression::List(values));
+    }
     if let Some((name, args)) = source.split_once(" using ") {
         let arguments = if args.trim().is_empty() { Vec::new() } else { args.split(',').map(|arg| parse_expression(arg, line)).collect::<Result<_, _>>()? };
         return Ok(Expression::Call { name: name.trim().to_string(), arguments });
@@ -146,6 +196,49 @@ fn parse_expression(source: &str, line: usize) -> Result<Expression, BasisError>
         return Ok(Expression::Variable(source.to_string()));
     }
     Err(BasisError::new(line, format!("cannot understand expression `{source}`")))
+}
+
+fn parse_condition(source: &str, line: usize) -> Result<Condition, BasisError> {
+    let source = source.trim();
+    if let Some((left, right)) = source.split_once(" is not ") {
+        return Ok(Condition::NotEquals(parse_expression(left, line)?, parse_expression(right, line)?));
+    }
+    if let Some((left, right)) = source.split_once(" is greater than ") {
+        return Ok(Condition::GreaterThan(parse_expression(left, line)?, parse_expression(right, line)?));
+    }
+    if let Some((left, right)) = source.split_once(" is less than ") {
+        return Ok(Condition::LessThan(parse_expression(left, line)?, parse_expression(right, line)?));
+    }
+    if let Some((left, right)) = source.split_once(" is ") {
+        return Ok(Condition::Equals(parse_expression(left, line)?, parse_expression(right, line)?));
+    }
+    Ok(Condition::Truthy(parse_expression(source, line)?))
+}
+
+fn split_top_level(source: &str, separator: char) -> Vec<&str> {
+    let mut pieces = Vec::new();
+    let mut start = 0;
+    let mut depth = 0;
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, character) in source.char_indices() {
+        if escaped { escaped = false; continue; }
+        if character == '\\' && quote.is_some() { escaped = true; continue; }
+        if quote == Some(character) {
+            quote = None;
+        } else if quote.is_none() && (character == '\'' || character == '"') {
+            quote = Some(character);
+        } else if quote.is_none() && character == '[' {
+            depth += 1;
+        } else if quote.is_none() && character == ']' {
+            depth -= 1;
+        } else if quote.is_none() && depth == 0 && character == separator {
+            pieces.push(&source[start..index]);
+            start = index + character.len_utf8();
+        }
+    }
+    pieces.push(&source[start..]);
+    pieces
 }
 
 #[derive(Clone)]
@@ -176,6 +269,32 @@ fn execute_block(statements: &[Statement], environment: &mut Environment, output
                 output.push(value.to_string());
             }
             Statement::Run { application } => { launch_application(application)?; }
+            Statement::When { condition, body } => {
+                if evaluate_condition(condition, environment, output)? {
+                    if let Some(value) = execute_block(body, environment, output, line)? { return Ok(Some(value)); }
+                }
+            }
+            Statement::Repeat { count, body } => {
+                let count = evaluate_repeat_count(count, environment, output)?;
+                for _ in 0..count {
+                    if let Some(value) = execute_block(body, environment, output, line)? { return Ok(Some(value)); }
+                }
+            }
+            Statement::While { condition, body } => {
+                while evaluate_condition(condition, environment, output)? {
+                    if let Some(value) = execute_block(body, environment, output, line)? { return Ok(Some(value)); }
+                }
+            }
+            Statement::ForEach { name, iterable, body } => {
+                let values = match evaluate(iterable, environment, output)? {
+                    Value::List(values) => values,
+                    other => return Err(BasisError::new(0, format!("cannot iterate over {other}"))),
+                };
+                for value in values {
+                    environment.variables.insert(name.clone(), value);
+                    if let Some(value) = execute_block(body, environment, output, line)? { return Ok(Some(value)); }
+                }
+            }
             Statement::Define { name, parameters, body } => { environment.functions.insert(name.clone(), Function { parameters: parameters.clone(), body: body.clone() }); }
             Statement::Return(expression) => return Ok(Some(evaluate(expression, environment, output)?)),
             Statement::Expression(expression) => { evaluate(expression, environment, output)?; }
@@ -189,6 +308,7 @@ fn evaluate(expression: &Expression, environment: &mut Environment, output: &mut
     match expression {
         Expression::Literal(value) => Ok(value.clone()),
         Expression::Variable(name) => environment.variables.get(name).cloned().ok_or_else(|| BasisError::new(0, format!("unknown variable `{name}`"))),
+        Expression::List(expressions) => Ok(Value::List(expressions.iter().map(|expression| evaluate(expression, environment, output)).collect::<Result<_, _>>()?)),
         Expression::Join(left, right) => Ok(Value::Text(format!("{}{}", evaluate(left, environment, output)?, evaluate(right, environment, output)?))),
         Expression::Call { name, arguments } => {
             let function = environment.functions.get(name).cloned().ok_or_else(|| BasisError::new(0, format!("unknown function `{name}`")))?;
@@ -197,6 +317,48 @@ fn evaluate(expression: &Expression, environment: &mut Environment, output: &mut
             for (parameter, argument) in function.parameters.iter().zip(arguments) { local.variables.insert(parameter.clone(), evaluate(argument, environment, output)?); }
             Ok(execute_block(&function.body, &mut local, output, 0)?.unwrap_or(Value::Nothing))
         }
+    }
+}
+
+fn evaluate_condition(condition: &Condition, environment: &mut Environment, output: &mut Vec<String>) -> Result<bool, BasisError> {
+    match condition {
+        Condition::Truthy(expression) => Ok(is_truthy(&evaluate(expression, environment, output)?)),
+        Condition::Equals(left, right) => Ok(evaluate(left, environment, output)? == evaluate(right, environment, output)?),
+        Condition::NotEquals(left, right) => Ok(evaluate(left, environment, output)? != evaluate(right, environment, output)?),
+        Condition::GreaterThan(left, right) => compare_values(left, right, environment, output, |ordering| ordering.is_gt()),
+        Condition::LessThan(left, right) => compare_values(left, right, environment, output, |ordering| ordering.is_lt()),
+    }
+}
+
+fn is_truthy(value: &Value) -> bool {
+    match value {
+        Value::Boolean(value) => *value,
+        Value::Number(value) => *value != 0.0,
+        Value::Text(value) => !value.is_empty(),
+        Value::List(values) => !values.is_empty(),
+        Value::Nothing => false,
+    }
+}
+
+fn compare_values<F>(left: &Expression, right: &Expression, environment: &mut Environment, output: &mut Vec<String>, predicate: F) -> Result<bool, BasisError>
+where
+    F: Fn(std::cmp::Ordering) -> bool,
+{
+    let left = evaluate(left, environment, output)?;
+    let right = evaluate(right, environment, output)?;
+    let ordering = match (left, right) {
+        (Value::Number(left), Value::Number(right)) => left.partial_cmp(&right),
+        (Value::Text(left), Value::Text(right)) => Some(left.cmp(&right)),
+        _ => None,
+    }.ok_or_else(|| BasisError::new(0, "values cannot be compared"))?;
+    Ok(predicate(ordering))
+}
+
+fn evaluate_repeat_count(expression: &Expression, environment: &mut Environment, output: &mut Vec<String>) -> Result<usize, BasisError> {
+    let value = evaluate(expression, environment, output)?;
+    match value {
+        Value::Number(value) if value >= 0.0 && value.fract() == 0.0 => Ok(value as usize),
+        other => Err(BasisError::new(0, format!("repeat expects a non-negative whole number, got {other}"))),
     }
 }
 
@@ -395,5 +557,36 @@ mod tests {
     #[test]
     fn parses_desktop_exec_placeholders() {
         assert_eq!(parse_exec("firefox --new-window %u").unwrap(), vec!["firefox", "--new-window"]);
+    }
+
+    #[test]
+    fn runs_conditions_and_repetition() {
+        let source = r#"
+            set score to 5
+            when score is 5, do
+                say "correct"
+            end
+            when score is greater than 3, do
+                say "high enough"
+            end
+            repeat 2 times, do
+                say "again"
+            end
+            while false, do
+                say "never"
+            end
+        "#;
+        assert_eq!(run(&parse(source).unwrap()).unwrap(), vec!["correct", "high enough", "again", "again"]);
+    }
+
+    #[test]
+    fn runs_for_each_over_dynamic_lists() {
+        let source = r#"
+            set names to ["Ada", "Grace"]
+            for each name in names, do
+                say name
+            end
+        "#;
+        assert_eq!(run(&parse(source).unwrap()).unwrap(), vec!["Ada", "Grace"]);
     }
 }
