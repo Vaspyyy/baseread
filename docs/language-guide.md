@@ -150,12 +150,28 @@ hide cursor
 show cursor
 say terminal width
 say terminal height
+say timer
 wait 0.5 seconds
 ```
 
 Colors include black, red, green, yellow, blue, magenta, cyan, white, gray,
 and their bright variants. ANSI controls are emitted during interactive runs;
 buffered library runs keep their output plain.
+
+For flicker-free ASCII interfaces, draw into the reusable screen buffer and
+render it in one operation:
+
+```basisread
+resize screen to 40, 12
+clear screen
+draw text "@" at 5, 6
+draw text "Dungeon" at 15, 2
+render screen
+```
+
+`screen width` and `screen height` report the current buffer size. Drawing is
+clipped at the buffer edges, and drawing a new frame replaces the old buffer
+only when you call `clear screen` or resize it.
 
 ## Recovering from errors
 
