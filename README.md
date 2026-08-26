@@ -22,4 +22,5 @@ Run the example after installing Rust:
 ```sh
 cargo run -- examples/hello.basis
 cargo run -- build examples/hello.basis -o hello
+cargo run -- --tokens examples/hello.basis
 ```
