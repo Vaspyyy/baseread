@@ -71,6 +71,8 @@ pub enum Expression {
     Variable(String),
     List(Vec<Expression>),
     ReadFile(Box<Expression>),
+    Length(Box<Expression>),
+    At(Box<Expression>, Box<Expression>),
     EnvironmentVariable(Box<Expression>),
     CurrentFolder,
     FileExists(Box<Expression>),
@@ -295,6 +297,9 @@ fn parse_expression(source: &str, line: usize) -> Result<Expression, BasisError>
     if let Some(path) = source.strip_prefix("read file ") {
         return Ok(Expression::ReadFile(Box::new(parse_expression(path, line)?)));
     }
+    if let Some(value) = source.strip_prefix("length of ") {
+        return Ok(Expression::Length(Box::new(parse_expression(value, line)?)));
+    }
     if let Some(name) = source.strip_prefix("environment variable ") {
         return Ok(Expression::EnvironmentVariable(Box::new(parse_expression(name, line)?)));
     }
@@ -312,6 +317,9 @@ fn parse_expression(source: &str, line: usize) -> Result<Expression, BasisError>
     }
     if let Some(path) = source.strip_prefix("list folders in ") {
         return Ok(Expression::ListFolders(Box::new(parse_expression(path, line)?)));
+    }
+    if let Some((value, index)) = split_phrase(source, " at ") {
+        return Ok(Expression::At(Box::new(parse_expression(value, line)?), Box::new(parse_expression(index, line)?)));
     }
     if source.starts_with('[') && source.ends_with(']') && source.len() >= 2 {
         let contents = &source[1..source.len() - 1];
@@ -605,6 +613,24 @@ fn evaluate(expression: &Expression, environment: &mut Environment, output: &mut
         Expression::ReadFile(path) => {
             let path = value_as_path(path, environment, output)?;
             Ok(Value::Text(fs::read_to_string(&path).map_err(|error| BasisError::new(0, format!("could not read file `{}`: {error}", path.display())))?))
+        }
+        Expression::Length(value) => {
+            let value = evaluate(value, environment, output)?;
+            let length = match value {
+                Value::Text(value) => value.chars().count(),
+                Value::List(values) => values.len(),
+                _ => return Err(BasisError::new(0, "length requires text or a list")),
+            };
+            Ok(Value::Number(length as f64))
+        }
+        Expression::At(value, index) => {
+            let value = evaluate(value, environment, output)?;
+            let index = evaluate_repeat_count(index, environment, output)?;
+            match value {
+                Value::List(values) => values.get(index).cloned().ok_or_else(|| BasisError::new(0, format!("list index {index} is out of bounds"))),
+                Value::Text(value) => value.chars().nth(index).map(|character| Value::Text(character.to_string())).ok_or_else(|| BasisError::new(0, format!("text index {index} is out of bounds"))),
+                _ => Err(BasisError::new(0, "at requires text or a list")),
+            }
         }
         Expression::EnvironmentVariable(name) => {
             let name = value_as_text(name, environment, output)?;
@@ -1101,8 +1127,11 @@ mod tests {
                 set counter to counter plus 1
             end
             say 1 plus 2 times 3
+            say length of ["a", "b"]
+            say ["a", "b"] at 1
+            say "hello" at 1
         "#;
-        assert_eq!(run(&parse(source).unwrap()).unwrap(), vec!["0", "1", "2", "7"]);
+        assert_eq!(run(&parse(source).unwrap()).unwrap(), vec!["0", "1", "2", "7", "2", "b", "e"]);
     }
 
     #[test]
