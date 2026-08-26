@@ -431,37 +431,38 @@ fn execute_block(statements: &[Statement], environment: &mut Environment, output
                 launch_application(application, arguments)?;
             }
             Statement::CreateFolder(path) => {
-                fs::create_dir_all(value_as_text(path, environment, output)?).map_err(|error| BasisError::new(0, format!("could not create folder: {error}")))?;
+                let path = value_as_path(path, environment, output)?;
+                fs::create_dir_all(&path).map_err(|error| BasisError::new(0, format!("could not create folder `{}`: {error}", path.display())))?;
             }
             Statement::Copy { source, destination } => {
-                let source = value_as_text(source, environment, output)?;
-                let destination = value_as_text(destination, environment, output)?;
-                fs::copy(&source, &destination).map_err(|error| BasisError::new(0, format!("could not copy `{source}` to `{destination}`: {error}")))?;
+                let source = value_as_path(source, environment, output)?;
+                let destination = value_as_path(destination, environment, output)?;
+                fs::copy(&source, &destination).map_err(|error| BasisError::new(0, format!("could not copy `{}` to `{}`: {error}", source.display(), destination.display())))?;
             }
             Statement::Move { source, destination } => {
-                let source = value_as_text(source, environment, output)?;
-                let destination = value_as_text(destination, environment, output)?;
-                fs::rename(&source, &destination).map_err(|error| BasisError::new(0, format!("could not move `{source}` to `{destination}`: {error}")))?;
+                let source = value_as_path(source, environment, output)?;
+                let destination = value_as_path(destination, environment, output)?;
+                fs::rename(&source, &destination).map_err(|error| BasisError::new(0, format!("could not move `{}` to `{}`: {error}", source.display(), destination.display())))?;
             }
             Statement::DeleteFile(path) => {
-                let path = value_as_text(path, environment, output)?;
-                fs::remove_file(&path).map_err(|error| BasisError::new(0, format!("could not delete file `{path}`: {error}")))?;
+                let path = value_as_path(path, environment, output)?;
+                fs::remove_file(&path).map_err(|error| BasisError::new(0, format!("could not delete file `{}`: {error}", path.display())))?;
             }
             Statement::DeleteFolder(path) => {
-                let path = value_as_text(path, environment, output)?;
-                fs::remove_dir_all(&path).map_err(|error| BasisError::new(0, format!("could not delete folder `{path}`: {error}")))?;
+                let path = value_as_path(path, environment, output)?;
+                fs::remove_dir_all(&path).map_err(|error| BasisError::new(0, format!("could not delete folder `{}`: {error}", path.display())))?;
             }
             Statement::WriteFile { content, path } => {
                 let content = value_as_text(content, environment, output)?;
-                let path = value_as_text(path, environment, output)?;
-                fs::write(&path, content).map_err(|error| BasisError::new(0, format!("could not write file `{path}`: {error}")))?;
+                let path = value_as_path(path, environment, output)?;
+                fs::write(&path, content).map_err(|error| BasisError::new(0, format!("could not write file `{}`: {error}", path.display())))?;
             }
             Statement::Shell(command) => {
                 let command = value_as_text(command, environment, output)?;
                 run_shell(command, output)?;
             }
             Statement::OpenFile(path) => {
-                let path = value_as_text(path, environment, output)?;
+                let path = value_as_path(path, environment, output)?;
                 open_file(path)?;
             }
             Statement::Stop => return Ok(Flow::Break),
@@ -535,8 +536,8 @@ fn evaluate(expression: &Expression, environment: &mut Environment, output: &mut
         }
         Expression::List(expressions) => Ok(Value::List(expressions.iter().map(|expression| evaluate(expression, environment, output)).collect::<Result<_, _>>()?)),
         Expression::ReadFile(path) => {
-            let path = value_as_text(path, environment, output)?;
-            Ok(Value::Text(fs::read_to_string(&path).map_err(|error| BasisError::new(0, format!("could not read file `{path}`: {error}")))?))
+            let path = value_as_path(path, environment, output)?;
+            Ok(Value::Text(fs::read_to_string(&path).map_err(|error| BasisError::new(0, format!("could not read file `{}`: {error}", path.display())))?))
         }
         Expression::EnvironmentVariable(name) => {
             let name = value_as_text(name, environment, output)?;
@@ -544,11 +545,11 @@ fn evaluate(expression: &Expression, environment: &mut Environment, output: &mut
         }
         Expression::CurrentFolder => Ok(Value::Text(env::current_dir().map_err(|error| BasisError::new(0, format!("could not get current folder: {error}")))?.display().to_string())),
         Expression::FileExists(path) => {
-            let path = value_as_text(path, environment, output)?;
+            let path = value_as_path(path, environment, output)?;
             Ok(Value::Boolean(fs::metadata(path).map(|metadata| metadata.is_file()).unwrap_or(false)))
         }
         Expression::FolderExists(path) => {
-            let path = value_as_text(path, environment, output)?;
+            let path = value_as_path(path, environment, output)?;
             Ok(Value::Boolean(fs::metadata(path).map(|metadata| metadata.is_dir()).unwrap_or(false)))
         }
         Expression::ListFiles(path) => list_directory(path, environment, output, false),
@@ -591,10 +592,24 @@ fn value_as_text(expression: &Expression, environment: &mut Environment, output:
     }
 }
 
+fn value_as_path(expression: &Expression, environment: &mut Environment, output: &mut Vec<String>) -> Result<PathBuf, BasisError> {
+    Ok(expand_path(&value_as_text(expression, environment, output)?))
+}
+
+fn expand_path(path: &str) -> PathBuf {
+    if path == "~" || path.starts_with("~/") {
+        if let Some(home) = env::var_os("HOME") {
+            let suffix = path.strip_prefix('~').unwrap_or_default().trim_start_matches('/');
+            return PathBuf::from(home).join(suffix);
+        }
+    }
+    PathBuf::from(path)
+}
+
 fn list_directory(expression: &Expression, environment: &mut Environment, output: &mut Vec<String>, folders: bool) -> Result<Value, BasisError> {
-    let path = value_as_text(expression, environment, output)?;
+    let path = value_as_path(expression, environment, output)?;
     let mut paths = fs::read_dir(&path)
-        .map_err(|error| BasisError::new(0, format!("could not list folder `{path}`: {error}")))?
+        .map_err(|error| BasisError::new(0, format!("could not list folder `{}`: {error}", path.display())))?
         .flatten()
         .filter_map(|entry| {
             let entry_path = entry.path();
@@ -617,8 +632,8 @@ fn run_shell(command: String, output: &mut Vec<String>) -> Result<(), BasisError
     Ok(())
 }
 
-fn open_file(path: String) -> Result<(), BasisError> {
-    Command::new("xdg-open").arg(&path).spawn().map_err(|error| BasisError::new(0, format!("could not open `{path}`: {error}")))?;
+fn open_file(path: PathBuf) -> Result<(), BasisError> {
+    Command::new("xdg-open").arg(&path).spawn().map_err(|error| BasisError::new(0, format!("could not open `{}`: {error}", path.display())))?;
     Ok(())
 }
 
@@ -1017,5 +1032,13 @@ mod tests {
             say hello
         "#;
         assert_eq!(run(&parse(source).unwrap()).unwrap(), vec!["Hello"]);
+    }
+
+    #[test]
+    fn expands_home_directory_paths() {
+        if let Some(home) = env::var_os("HOME") {
+            assert_eq!(expand_path("~/basisread"), PathBuf::from(home).join("basisread"));
+        }
+        assert_eq!(expand_path("relative/file"), PathBuf::from("relative/file"));
     }
 }
