@@ -500,7 +500,7 @@ fn execute_block(statements: &[Statement], environment: &mut Environment, output
             Statement::Copy { source, destination } => {
                 let source = value_as_path(source, environment, output)?;
                 let destination = value_as_path(destination, environment, output)?;
-                fs::copy(&source, &destination).map_err(|error| BasisError::new(0, format!("could not copy `{}` to `{}`: {error}", source.display(), destination.display())))?;
+                copy_path(&source, &destination).map_err(|error| BasisError::new(0, format!("could not copy `{}` to `{}`: {error}", source.display(), destination.display())))?;
             }
             Statement::Move { source, destination } => {
                 let source = value_as_path(source, environment, output)?;
@@ -757,6 +757,22 @@ fn open_file(path: PathBuf) -> Result<(), BasisError> {
     Ok(())
 }
 
+fn copy_path(source: &Path, destination: &Path) -> std::io::Result<()> {
+    if source.is_dir() {
+        fs::create_dir_all(destination)?;
+        for entry in fs::read_dir(source)? {
+            let entry = entry?;
+            copy_path(&entry.path(), &destination.join(entry.file_name()))?;
+        }
+    } else {
+        if let Some(parent) = destination.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(source, destination)?;
+    }
+    Ok(())
+}
+
 fn numeric_operation<F>(left: &Expression, right: &Expression, environment: &mut Environment, output: &mut Vec<String>, operation: F) -> Result<Value, BasisError>
 where
     F: Fn(f64, f64) -> f64,
@@ -867,6 +883,7 @@ pub fn compile_source(source: &str, output_path: impl AsRef<Path>, runtime_sourc
         .status()?;
     let cleanup_result = fs::remove_dir_all(&build_directory);
     if !result.success() {
+        let _ = cleanup_result;
         return Err(format!("rustc failed with status {result}").into());
     }
     cleanup_result?;
@@ -1223,5 +1240,18 @@ mod tests {
     fn unescapes_text_literals() {
         let source = r#"say "line one\nline two\tend""#;
         assert_eq!(run(&parse(source).unwrap()).unwrap(), vec!["line one\nline two\tend"]);
+    }
+
+    #[test]
+    fn copies_directories_recursively() {
+        let suffix = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let source = std::env::temp_dir().join(format!("basisread-copy-source-{suffix}"));
+        let destination = std::env::temp_dir().join(format!("basisread-copy-destination-{suffix}"));
+        fs::create_dir_all(source.join("nested")).unwrap();
+        fs::write(source.join("nested/value.txt"), "value").unwrap();
+        copy_path(&source, &destination).unwrap();
+        assert_eq!(fs::read_to_string(destination.join("nested/value.txt")).unwrap(), "value");
+        fs::remove_dir_all(source).unwrap();
+        fs::remove_dir_all(destination).unwrap();
     }
 }
