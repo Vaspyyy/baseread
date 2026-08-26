@@ -1,0 +1,43 @@
+# A small turn-based dungeon loop. Run it with: basisread examples/dungeon.basis
+
+set player to {
+    health: 20,
+    gold: 0,
+    inventory: []
+}
+
+set enemies to [
+    { name: "slime", damage: 3, reward: 2 },
+    { name: "goblin", damage: 5, reward: 5 }
+]
+
+define fight using enemy, do
+    say "A {enemy.name} appears!"
+    set damage to random integer from 1 to enemy.damage
+    set player.health to player.health minus damage
+    set player.gold to player.gold plus enemy.reward
+    say "You take {damage} damage and find {enemy.reward} gold."
+end
+
+while player.health is greater than 0
+    clear terminal
+    say "Health: {player.health}"
+    say "Gold: {player.gold}"
+    set action to ask "Explore, rest, or inventory? "
+
+    when action is "explore", do
+        set enemy to random choice from enemies
+        fight using enemy
+    end
+
+    when action is "rest", do
+        set player.health to player.health plus 2
+        say "You rest and recover."
+    end
+
+    when action is "inventory", do
+        say player.inventory
+    end
+end
+
+say "The dungeon wins."
