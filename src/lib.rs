@@ -65,6 +65,10 @@ pub enum Expression {
     Variable(String),
     List(Vec<Expression>),
     ReadFile(Box<Expression>),
+    EnvironmentVariable(Box<Expression>),
+    CurrentFolder,
+    FileExists(Box<Expression>),
+    FolderExists(Box<Expression>),
     Add(Box<Expression>, Box<Expression>),
     Subtract(Box<Expression>, Box<Expression>),
     Multiply(Box<Expression>, Box<Expression>),
@@ -257,6 +261,18 @@ fn parse_expression(source: &str, line: usize) -> Result<Expression, BasisError>
     if let Ok(number) = source.parse::<f64>() { return Ok(Expression::Literal(Value::Number(number))); }
     if let Some(path) = source.strip_prefix("read file ") {
         return Ok(Expression::ReadFile(Box::new(parse_expression(path, line)?)));
+    }
+    if let Some(name) = source.strip_prefix("environment variable ") {
+        return Ok(Expression::EnvironmentVariable(Box::new(parse_expression(name, line)?)));
+    }
+    if source == "current folder" {
+        return Ok(Expression::CurrentFolder);
+    }
+    if let Some(path) = source.strip_prefix("file exists ") {
+        return Ok(Expression::FileExists(Box::new(parse_expression(path, line)?)));
+    }
+    if let Some(path) = source.strip_prefix("folder exists ") {
+        return Ok(Expression::FolderExists(Box::new(parse_expression(path, line)?)));
     }
     if source.starts_with('[') && source.ends_with(']') && source.len() >= 2 {
         let contents = &source[1..source.len() - 1];
@@ -467,6 +483,19 @@ fn evaluate(expression: &Expression, environment: &mut Environment, output: &mut
         Expression::ReadFile(path) => {
             let path = value_as_text(path, environment, output)?;
             Ok(Value::Text(fs::read_to_string(&path).map_err(|error| BasisError::new(0, format!("could not read file `{path}`: {error}")))?))
+        }
+        Expression::EnvironmentVariable(name) => {
+            let name = value_as_text(name, environment, output)?;
+            Ok(env::var(name).map(Value::Text).unwrap_or(Value::Nothing))
+        }
+        Expression::CurrentFolder => Ok(Value::Text(env::current_dir().map_err(|error| BasisError::new(0, format!("could not get current folder: {error}")))?.display().to_string())),
+        Expression::FileExists(path) => {
+            let path = value_as_text(path, environment, output)?;
+            Ok(Value::Boolean(fs::metadata(path).map(|metadata| metadata.is_file()).unwrap_or(false)))
+        }
+        Expression::FolderExists(path) => {
+            let path = value_as_text(path, environment, output)?;
+            Ok(Value::Boolean(fs::metadata(path).map(|metadata| metadata.is_dir()).unwrap_or(false)))
         }
         Expression::Add(left, right) => numeric_operation(left, right, environment, output, |left, right| left + right),
         Expression::Subtract(left, right) => numeric_operation(left, right, environment, output, |left, right| left - right),
@@ -827,10 +856,10 @@ mod tests {
         let input = root.join("input.txt");
         let copy = root.join("copy.txt");
         let source = format!(
-            "create folder \"{}\"\nwrite \"hello\" to file \"{}\"\ncopy \"{}\" to \"{}\"\nsay read file \"{}\"\nshell \"printf shell\"\ndelete folder \"{}\"",
-            root.display(), input.display(), input.display(), copy.display(), copy.display(), root.display()
+            "create folder \"{}\"\nwrite \"hello\" to file \"{}\"\nwhen folder exists \"{}\", do\n say \"folder present\"\nend\nwhen file exists \"{}\", do\n say read file \"{}\"\nend\ncopy \"{}\" to \"{}\"\nshell \"printf shell\"\ndelete folder \"{}\"",
+            root.display(), input.display(), root.display(), input.display(), input.display(), input.display(), copy.display(), root.display()
         );
-        assert_eq!(run(&parse(&source).unwrap()).unwrap(), vec!["hello", "shell"]);
+        assert_eq!(run(&parse(&source).unwrap()).unwrap(), vec!["folder present", "hello", "shell"]);
         assert!(!root.exists());
     }
 
