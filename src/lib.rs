@@ -274,6 +274,9 @@ fn parse_block(lines: &[(usize, &str)], cursor: &mut usize, nested: bool, stop_a
             *cursor += 1;
             let (body, _) = parse_block(lines, cursor, true, false)?;
             statements.push(Statement::ForEach { name: name.trim().to_string(), iterable: parse_expression(iterable, line_number)?, body });
+        } else if line == "return" {
+            statements.push(Statement::Return(Expression::Literal(Value::Nothing)));
+            *cursor += 1;
         } else if let Some(rest) = line.strip_prefix("return ") {
             statements.push(Statement::Return(parse_expression(rest, line_number)?));
             *cursor += 1;
@@ -1278,6 +1281,18 @@ mod tests {
             say hello
         "#;
         assert_eq!(run(&parse(source).unwrap()).unwrap(), vec!["Hello"]);
+    }
+
+    #[test]
+    fn supports_return_without_a_value() {
+        let source = r#"
+            define finish, do
+                return
+                say "unreachable"
+            end
+            say finish
+        "#;
+        assert_eq!(run(&parse(source).unwrap()).unwrap(), vec!["nothing"]);
     }
 
     #[test]
