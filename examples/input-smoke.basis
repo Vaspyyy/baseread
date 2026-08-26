@@ -1,0 +1,4 @@
+# Non-blocking input is useful for games that update only when a key arrives.
+
+set ready to key available
+say ready
