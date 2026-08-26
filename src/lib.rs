@@ -41,6 +41,7 @@ pub struct Program {
 #[derive(Debug, Clone)]
 pub enum Statement {
     Set { name: String, value: Expression },
+    SetEnvironment { name: Expression, value: Expression },
     Say(Expression),
     Run { application: String, arguments: Vec<Expression> },
     CreateFolder(Expression),
@@ -149,8 +150,13 @@ fn parse_block(lines: &[(usize, &str)], cursor: &mut usize, nested: bool, stop_a
             return Ok((statements, true));
         }
         if let Some(rest) = line.strip_prefix("set ") {
-            let (name, expression) = rest.split_once(" to ").ok_or_else(|| BasisError::new(line_number, "expected `set name to value`"))?;
-            statements.push(Statement::Set { name: name.trim().to_string(), value: parse_expression(expression, line_number)? });
+            if let Some(rest) = rest.strip_prefix("environment variable ") {
+                let (name, value) = split_phrase(rest, " to ").ok_or_else(|| BasisError::new(line_number, "expected `set environment variable name to value`"))?;
+                statements.push(Statement::SetEnvironment { name: parse_expression(name, line_number)?, value: parse_expression(value, line_number)? });
+            } else {
+                let (name, expression) = rest.split_once(" to ").ok_or_else(|| BasisError::new(line_number, "expected `set name to value`"))?;
+                statements.push(Statement::Set { name: name.trim().to_string(), value: parse_expression(expression, line_number)? });
+            }
             *cursor += 1;
         } else if let Some(expression) = line.strip_prefix("say ") {
             statements.push(Statement::Say(parse_expression(expression, line_number)?));
@@ -422,6 +428,11 @@ fn execute_block(statements: &[Statement], environment: &mut Environment, output
     for statement in statements {
         match statement {
             Statement::Set { name, value } => { let value = evaluate(value, environment, output)?; environment.variables.insert(name.clone(), value); }
+            Statement::SetEnvironment { name, value } => {
+                let name = value_as_text(name, environment, output)?;
+                let value = value_as_text(value, environment, output)?;
+                env::set_var(name, value);
+            }
             Statement::Say(expression) => {
                 let value = evaluate(expression, environment, output)?;
                 output.push(value.to_string());
@@ -1027,10 +1038,10 @@ mod tests {
         let input = root.join("input.txt");
         let copy = root.join("copy.txt");
         let source = format!(
-            "create folder \"{}\"\nwrite \"hello\" to file \"{}\"\nwhen folder exists \"{}\", do\n say \"folder present\"\nend\nwhen file exists \"{}\", do\n say read file \"{}\"\nend\ncopy \"{}\" to \"{}\"\nset files to list files in \"{}\"\nfor each file in files, do\n say file\nend\nshell \"printf shell\"\ndelete folder \"{}\"",
+            "create folder \"{}\"\nwrite \"hello\" to file \"{}\"\nwhen folder exists \"{}\", do\n say \"folder present\"\nend\nwhen file exists \"{}\", do\n say read file \"{}\"\nend\ncopy \"{}\" to \"{}\"\nset files to list files in \"{}\"\nfor each file in files, do\n say file\nend\nset environment variable \"BASISREAD_TEST_MODE\" to \"works\"\nshell \"printf $BASISREAD_TEST_MODE\"\ndelete folder \"{}\"",
             root.display(), input.display(), root.display(), input.display(), input.display(), input.display(), copy.display(), root.display(), root.display()
         );
-        assert_eq!(run(&parse(&source).unwrap()).unwrap(), vec!["folder present".to_string(), "hello".to_string(), copy.display().to_string(), input.display().to_string(), "shell".to_string()]);
+        assert_eq!(run(&parse(&source).unwrap()).unwrap(), vec!["folder present".to_string(), "hello".to_string(), copy.display().to_string(), input.display().to_string(), "works".to_string()]);
         assert!(!root.exists());
     }
 
