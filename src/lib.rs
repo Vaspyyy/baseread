@@ -1116,6 +1116,22 @@ mod tests {
     }
 
     #[test]
+    fn resolves_real_desktop_entries_with_precedence() {
+        let suffix = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let user_directory = std::env::temp_dir().join(format!("basisread-apps-user-{suffix}"));
+        let system_directory = std::env::temp_dir().join(format!("basisread-apps-system-{suffix}"));
+        fs::create_dir_all(&user_directory).unwrap();
+        fs::create_dir_all(&system_directory).unwrap();
+        fs::write(user_directory.join("firefox.desktop"), "[Desktop Entry]\nType=Application\nName=Firefox\nExec=firefox %u\n").unwrap();
+        fs::write(system_directory.join("firefox.desktop"), "[Desktop Entry]\nType=Application\nName=System Firefox\nExec=firefox %u\n").unwrap();
+        let resolved = resolve_application_in("firefokx", &[user_directory.clone(), system_directory.clone()]).unwrap();
+        assert_eq!(resolved.name, "Firefox");
+        assert_eq!(resolved.exec, "firefox %u");
+        fs::remove_dir_all(user_directory).unwrap();
+        fs::remove_dir_all(system_directory).unwrap();
+    }
+
+    #[test]
     fn parses_desktop_exec_placeholders() {
         assert_eq!(parse_exec("firefox --new-window %u").unwrap(), vec!["firefox", "--new-window"]);
     }
