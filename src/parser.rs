@@ -296,14 +296,27 @@ impl Parser {
         self.expect_word("text")?;
         let line_end = self.find_line_end(self.cursor);
         let at = self.find_first_word(self.cursor, line_end, "at").ok_or_else(|| self.error_here("expected `at x, y` after draw text"))?;
-        let text = self.parse_expression_range(self.cursor, at)?;
+        let color_index = self.find_first_word(self.cursor, at, "in");
+        let (text_end, color) = if let Some(color_index) = color_index {
+            let color = self.tokens_to_text(color_index + 1, at);
+            if !is_terminal_color(&color) {
+                return Err(self.error_at(color_index, "expected a terminal color after `in`"));
+            }
+            (color_index, Some(color))
+        } else {
+            (at, None)
+        };
+        let text = self.parse_expression_range(self.cursor, text_end)?;
         self.cursor = at;
         self.expect_word("at")?;
         let x = self.parse_expression_until_comma()?;
         self.expect_comma()?;
         let y = self.parse_expression_line()?;
         self.finish_line()?;
-        Ok(Statement::DrawText { text, x, y })
+        Ok(match color {
+            Some(color) => Statement::DrawTextColored { text, x, y, color },
+            None => Statement::DrawText { text, x, y },
+        })
     }
 
     fn parse_resize_screen(&mut self) -> Result<Statement, BasisError> {
