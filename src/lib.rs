@@ -9,6 +9,9 @@ use std::{
     io::Write,
 };
 
+pub mod lexer;
+pub use lexer::{lex, Span, Token, TokenKind};
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Text(String),
@@ -130,6 +133,7 @@ impl fmt::Display for BasisError {
 impl std::error::Error for BasisError {}
 
 pub fn parse(source: &str) -> Result<Program, BasisError> {
+    lex(source)?;
     let lines: Vec<(usize, &str)> = source
         .lines()
         .enumerate()
@@ -1103,6 +1107,55 @@ fn parse_exec(exec: &str) -> Result<Vec<String>, BasisError> {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn lexes_words_text_numbers_and_structure() {
+        let tokens = lex("set name to \"Ransom\"\nwhen name is 5, do\nend").unwrap();
+        assert_eq!(
+            tokens.into_iter().map(|token| token.kind).collect::<Vec<_>>(),
+            vec![
+                TokenKind::Word("set".into()),
+                TokenKind::Word("name".into()),
+                TokenKind::Word("to".into()),
+                TokenKind::Text("Ransom".into()),
+                TokenKind::Newline,
+                TokenKind::Word("when".into()),
+                TokenKind::Word("name".into()),
+                TokenKind::Word("is".into()),
+                TokenKind::Number(5.0),
+                TokenKind::Comma,
+                TokenKind::Word("do".into()),
+                TokenKind::Newline,
+                TokenKind::Word("end".into()),
+                TokenKind::End,
+            ]
+        );
+    }
+
+    #[test]
+    fn lexer_ignores_comments_but_preserves_comment_markers_in_text() {
+        let tokens = lex("say \"hello # world\" # ignored\n# ignored too\nsay done").unwrap();
+        assert!(tokens.iter().any(|token| token.kind == TokenKind::Text("hello # world".into())));
+        assert!(tokens.iter().any(|token| token.kind == TokenKind::Word("done".into())));
+        assert!(!tokens.iter().any(|token| token.kind == TokenKind::Word("ignored".into())));
+    }
+
+    #[test]
+    fn lexer_decodes_escapes_and_tracks_positions() {
+        let tokens = lex("say \"line one\\nline two\"\n    say done").unwrap();
+        assert_eq!(tokens[1].kind, TokenKind::Text("line one\nline two".into()));
+        assert_eq!(tokens[1].span.line, 1);
+        assert_eq!(tokens[1].span.column, 5);
+        assert_eq!(tokens[4].span.line, 2);
+        assert_eq!(tokens[4].span.column, 9);
+    }
+
+    #[test]
+    fn parser_reports_lexical_string_errors() {
+        let error = parse("say \"unterminated").unwrap_err();
+        assert_eq!(error.line, 1);
+        assert!(error.message.contains("unterminated string literal"));
+    }
 
     #[test]
     fn runs_variables_and_output() {
