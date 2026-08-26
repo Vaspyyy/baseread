@@ -761,7 +761,7 @@ fn ask_key_value(environment: &mut Environment) -> Result<Value, BasisError> {
         return Err(BasisError::new(0, "ask key needs input; use run_interactive or run_with_input"));
     }
 
-    terminal_key(environment, true)?.ok_or_else(|| BasisError::new(0, "could not read key"))
+    terminal_key(environment, true)?.map(Value::Text).ok_or_else(|| BasisError::new(0, "could not read key"))
 }
 
 fn key_available_value(environment: &mut Environment) -> Result<Value, BasisError> {
