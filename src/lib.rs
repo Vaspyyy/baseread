@@ -69,6 +69,8 @@ pub enum Expression {
     CurrentFolder,
     FileExists(Box<Expression>),
     FolderExists(Box<Expression>),
+    ListFiles(Box<Expression>),
+    ListFolders(Box<Expression>),
     Add(Box<Expression>, Box<Expression>),
     Subtract(Box<Expression>, Box<Expression>),
     Multiply(Box<Expression>, Box<Expression>),
@@ -273,6 +275,12 @@ fn parse_expression(source: &str, line: usize) -> Result<Expression, BasisError>
     }
     if let Some(path) = source.strip_prefix("folder exists ") {
         return Ok(Expression::FolderExists(Box::new(parse_expression(path, line)?)));
+    }
+    if let Some(path) = source.strip_prefix("list files in ") {
+        return Ok(Expression::ListFiles(Box::new(parse_expression(path, line)?)));
+    }
+    if let Some(path) = source.strip_prefix("list folders in ") {
+        return Ok(Expression::ListFolders(Box::new(parse_expression(path, line)?)));
     }
     if source.starts_with('[') && source.ends_with(']') && source.len() >= 2 {
         let contents = &source[1..source.len() - 1];
@@ -497,6 +505,8 @@ fn evaluate(expression: &Expression, environment: &mut Environment, output: &mut
             let path = value_as_text(path, environment, output)?;
             Ok(Value::Boolean(fs::metadata(path).map(|metadata| metadata.is_dir()).unwrap_or(false)))
         }
+        Expression::ListFiles(path) => list_directory(path, environment, output, false),
+        Expression::ListFolders(path) => list_directory(path, environment, output, true),
         Expression::Add(left, right) => numeric_operation(left, right, environment, output, |left, right| left + right),
         Expression::Subtract(left, right) => numeric_operation(left, right, environment, output, |left, right| left - right),
         Expression::Multiply(left, right) => numeric_operation(left, right, environment, output, |left, right| left * right),
@@ -524,6 +534,21 @@ fn value_as_text(expression: &Expression, environment: &mut Environment, output:
         Value::Text(value) => Ok(value),
         value => Err(BasisError::new(0, format!("expected text, got {value}"))),
     }
+}
+
+fn list_directory(expression: &Expression, environment: &mut Environment, output: &mut Vec<String>, folders: bool) -> Result<Value, BasisError> {
+    let path = value_as_text(expression, environment, output)?;
+    let mut paths = fs::read_dir(&path)
+        .map_err(|error| BasisError::new(0, format!("could not list folder `{path}`: {error}")))?
+        .flatten()
+        .filter_map(|entry| {
+            let entry_path = entry.path();
+            let is_match = entry_path.is_dir() == folders;
+            is_match.then(|| Value::Text(entry_path.display().to_string()))
+        })
+        .collect::<Vec<_>>();
+    paths.sort_by_key(|value| value.to_string());
+    Ok(Value::List(paths))
 }
 
 fn run_shell(command: String, output: &mut Vec<String>) -> Result<(), BasisError> {
@@ -856,10 +881,10 @@ mod tests {
         let input = root.join("input.txt");
         let copy = root.join("copy.txt");
         let source = format!(
-            "create folder \"{}\"\nwrite \"hello\" to file \"{}\"\nwhen folder exists \"{}\", do\n say \"folder present\"\nend\nwhen file exists \"{}\", do\n say read file \"{}\"\nend\ncopy \"{}\" to \"{}\"\nshell \"printf shell\"\ndelete folder \"{}\"",
-            root.display(), input.display(), root.display(), input.display(), input.display(), input.display(), copy.display(), root.display()
+            "create folder \"{}\"\nwrite \"hello\" to file \"{}\"\nwhen folder exists \"{}\", do\n say \"folder present\"\nend\nwhen file exists \"{}\", do\n say read file \"{}\"\nend\ncopy \"{}\" to \"{}\"\nset files to list files in \"{}\"\nfor each file in files, do\n say file\nend\nshell \"printf shell\"\ndelete folder \"{}\"",
+            root.display(), input.display(), root.display(), input.display(), input.display(), input.display(), copy.display(), root.display(), root.display()
         );
-        assert_eq!(run(&parse(&source).unwrap()).unwrap(), vec!["folder present", "hello", "shell"]);
+        assert_eq!(run(&parse(&source).unwrap()).unwrap(), vec!["folder present", "hello", copy.display().to_string(), input.display().to_string(), "shell"]);
         assert!(!root.exists());
     }
 
