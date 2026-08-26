@@ -40,9 +40,9 @@ impl Parser {
                 self.cursor += 1;
                 return Ok((statements, false));
             }
-            if self.is_word("otherwise") {
+            if self.is_word("otherwise") || self.is_word("else") {
                 if !stop_at_otherwise {
-                    return Err(self.error_here("`otherwise` must belong to a `when` block"));
+                    return Err(self.error_here("`otherwise` or `else` must belong to a block"));
                 }
                 self.cursor += 1;
                 self.expect_comma()?;
@@ -57,6 +57,23 @@ impl Parser {
     fn parse_statement(&mut self) -> Result<Statement, BasisError> {
         if self.is_word("set") {
             return self.parse_set();
+        }
+        if self.is_word("save") {
+            return self.parse_save();
+        }
+        if self.is_word("wait") {
+            return self.parse_wait();
+        }
+        if self.starts_with_line_phrase(&["clear", "terminal"]) {
+            self.cursor += 2;
+            self.finish_line()?;
+            return Ok(Statement::ClearTerminal);
+        }
+        if self.is_word("add") {
+            return self.parse_list_add_or_remove(true);
+        }
+        if self.is_word("remove") {
+            return self.parse_list_add_or_remove(false);
         }
         if self.is_word("say") {
             self.cursor += 1;
@@ -157,6 +174,9 @@ impl Parser {
         if self.is_word("when") {
             return self.parse_when();
         }
+        if self.is_word("try") {
+            return self.parse_try();
+        }
         if self.is_word("repeat") {
             return self.parse_repeat();
         }
@@ -187,6 +207,14 @@ impl Parser {
 
     fn parse_set(&mut self) -> Result<Statement, BasisError> {
         self.expect_word("set")?;
+        let line_end = self.find_line_end(self.cursor);
+        if self.starts_with_phrase(self.cursor, line_end, &["random", "seed"]) {
+            self.cursor += 2;
+            self.expect_word("to")?;
+            let seed = self.parse_expression_line()?;
+            self.finish_line()?;
+            return Ok(Statement::SeedRandom(seed));
+        }
         if self.consume_word("environment") {
             self.expect_word("variable")?;
             let name = self.parse_expression_until_word("to")?;
@@ -195,11 +223,49 @@ impl Parser {
             self.finish_line()?;
             return Ok(Statement::SetEnvironment { name, value });
         }
-        let name = self.expect_any_word()?;
+        let to = self.find_first_word(self.cursor, line_end, "to").ok_or_else(|| self.error_here("expected `to` in assignment"))?;
+        let path = self.parse_path_range(self.cursor, to)?;
+        self.cursor = to;
         self.expect_word("to")?;
         let value = self.parse_expression_line()?;
         self.finish_line()?;
-        Ok(Statement::Set { name, value })
+        if path.len() == 1 {
+            Ok(Statement::Set { name: path[0].clone(), value })
+        } else {
+            Ok(Statement::SetPath { path, value })
+        }
+    }
+
+    fn parse_save(&mut self) -> Result<Statement, BasisError> {
+        self.expect_word("save")?;
+        let value = self.parse_expression_until_phrase(&["to", "file"])?;
+        self.expect_word("to")?;
+        self.expect_word("file")?;
+        let path = self.parse_expression_line()?;
+        self.finish_line()?;
+        Ok(Statement::Save { value, path })
+    }
+
+    fn parse_wait(&mut self) -> Result<Statement, BasisError> {
+        self.expect_word("wait")?;
+        let end = self.find_line_end(self.cursor);
+        let expression_end = if end > self.cursor && self.word_at(end - 1) == Some("seconds") { end - 1 } else { end };
+        let seconds = self.parse_expression_range(self.cursor, expression_end)?;
+        self.cursor = end;
+        self.finish_line()?;
+        Ok(Statement::Wait(seconds))
+    }
+
+    fn parse_list_add_or_remove(&mut self, adding: bool) -> Result<Statement, BasisError> {
+        self.cursor += 1;
+        let marker = if adding { "to" } else { "from" };
+        let line_end = self.find_line_end(self.cursor);
+        let marker_index = self.find_last_word_operator(self.cursor, line_end, &[marker]).ok_or_else(|| self.error_here(format!("expected `{marker}` in list operation")))?;
+        let value = self.parse_expression_range(self.cursor, marker_index)?;
+        let path = self.parse_path_range(marker_index + 1, line_end)?;
+        self.cursor = line_end;
+        self.finish_line()?;
+        Ok(if adding { Statement::ListAdd { path, value } } else { Statement::ListRemove { path, value } })
     }
 
     fn parse_run(&mut self) -> Result<Statement, BasisError> {
@@ -241,6 +307,19 @@ impl Parser {
         Ok(Statement::When { condition, body, otherwise })
     }
 
+    fn parse_try(&mut self) -> Result<Statement, BasisError> {
+        self.expect_word("try")?;
+        self.expect_comma()?;
+        self.expect_word("do")?;
+        self.finish_line()?;
+        let (body, has_otherwise) = self.parse_block(true, true)?;
+        if !has_otherwise {
+            return Err(self.error_here("expected `otherwise, do` or `else, do` in try block"));
+        }
+        let otherwise = self.parse_block(true, false)?.0;
+        Ok(Statement::Try { body, otherwise })
+    }
+
     fn parse_repeat(&mut self) -> Result<Statement, BasisError> {
         self.expect_word("repeat")?;
         let marker = self.find_repeat_marker(self.cursor).ok_or_else(|| self.error_here("expected `repeat count times, do`"))?;
@@ -256,11 +335,16 @@ impl Parser {
 
     fn parse_while(&mut self) -> Result<Statement, BasisError> {
         self.expect_word("while")?;
-        let condition_end = self.find_first_comma(self.cursor, self.find_line_end(self.cursor)).ok_or_else(|| self.error_here("expected `while condition, do`"))?;
+        let line_end = self.find_line_end(self.cursor);
+        let comma = self.find_first_comma(self.cursor, line_end);
+        let explicit_marker = comma.is_some_and(|index| self.word_at(index + 1) == Some("do"));
+        let condition_end = if explicit_marker { comma.expect("comma exists") } else { line_end };
         let condition = self.parse_condition_range(self.cursor, condition_end)?;
         self.cursor = condition_end;
-        self.expect_comma()?;
-        self.expect_word("do")?;
+        if explicit_marker {
+            self.expect_comma()?;
+            self.expect_word("do")?;
+        }
         self.finish_line()?;
         let body = self.parse_block(true, false)?.0;
         Ok(Statement::While { condition, body })
@@ -362,6 +446,52 @@ impl Parser {
             return Ok(Expression::At(Box::new(self.parse_expression_range(start, index)?), Box::new(self.parse_expression_range(index + 1, end)?)));
         }
 
+        if self.starts_with_phrase(start, end, &["ask"]) {
+            if start + 1 >= end {
+                return Err(self.error_at(start, "expected a prompt after `ask`"));
+            }
+            return Ok(Expression::Ask(Box::new(self.parse_expression_range(start + 1, end)?)));
+        }
+        if self.starts_with_phrase(start, end, &["load", "file"]) {
+            if start + 2 >= end {
+                return Err(self.error_at(start, "expected a path after `load file`"));
+            }
+            return Ok(Expression::LoadFile(Box::new(self.parse_expression_range(start + 2, end)?)));
+        }
+        if self.starts_with_phrase(start, end, &["random", "choice", "from"]) {
+            return Ok(Expression::RandomChoice(Box::new(self.parse_expression_range(start + 3, end)?)));
+        }
+        if self.starts_with_phrase(start, end, &["random", "number"]) || self.starts_with_phrase(start, end, &["random", "integer"]) {
+            let integer = self.word_at(start + 1) == Some("integer");
+            if start + 2 == end {
+                return Ok(Expression::RandomNumber { lower: None, upper: None, integer });
+            }
+            if self.word_at(start + 2) != Some("from") {
+                return Err(self.error_at(start + 2, "expected `from` after random number kind"));
+            }
+            let to = self.find_first_word(start + 3, end, "to").ok_or_else(|| self.error_at(start, "expected `to` between random number bounds"))?;
+            let lower = self.parse_expression_range(start + 3, to)?;
+            let upper = self.parse_expression_range(to + 1, end)?;
+            return Ok(Expression::RandomNumber { lower: Some(Box::new(lower)), upper: Some(Box::new(upper)), integer });
+        }
+        if self.starts_with_phrase(start, end, &["minimum", "of"]) {
+            let and = self.find_last_word_operator(start + 2, end, &["and"]).ok_or_else(|| self.error_at(start, "minimum needs two values joined by `and`"))?;
+            return Ok(Expression::Minimum(Box::new(self.parse_expression_range(start + 2, and)?), Box::new(self.parse_expression_range(and + 1, end)?)));
+        }
+        if self.starts_with_phrase(start, end, &["maximum", "of"]) {
+            let and = self.find_last_word_operator(start + 2, end, &["and"]).ok_or_else(|| self.error_at(start, "maximum needs two values joined by `and`"))?;
+            return Ok(Expression::Maximum(Box::new(self.parse_expression_range(start + 2, and)?), Box::new(self.parse_expression_range(and + 1, end)?)));
+        }
+        if self.word_at(start) == Some("clamp") {
+            let between = self.find_first_word(start + 1, end, "between").ok_or_else(|| self.error_at(start, "clamp needs `between` and `and`"))?;
+            let and = self.find_last_word_operator(between + 1, end, &["and"]).ok_or_else(|| self.error_at(start, "clamp needs `and` between bounds"))?;
+            return Ok(Expression::Clamp {
+                value: Box::new(self.parse_expression_range(start + 1, between)?),
+                lower: Box::new(self.parse_expression_range(between + 1, and)?),
+                upper: Box::new(self.parse_expression_range(and + 1, end)?),
+            });
+        }
+
         for (phrase, constructor) in [
             (&["read", "file"][..], 0),
             (&["length", "of"][..], 1),
@@ -398,6 +528,29 @@ impl Parser {
         if self.token_is(start, TokenKind::LeftBracket) && self.token_is(end - 1, TokenKind::RightBracket) {
             let values = self.split_ranges(start + 1, end - 1, TokenKind::Comma).into_iter().filter_map(|(left, right)| (left < right).then_some((left, right))).map(|(left, right)| self.parse_expression_range(left, right)).collect::<Result<_, _>>()?;
             return Ok(Expression::List(values));
+        }
+
+        if self.token_is(start, TokenKind::LeftBrace) && self.token_is(end - 1, TokenKind::RightBrace) {
+            let mut entries = Vec::new();
+            for (left, right) in self.split_ranges(start + 1, end - 1, TokenKind::Comma) {
+                if left >= right { continue; }
+                let colon = self.find_first_top_level_kind(left, right, TokenKind::Colon).ok_or_else(|| self.error_at(left, "object fields need `key: value`"))?;
+                let key = match &self.tokens[left].kind {
+                    TokenKind::Word(value) | TokenKind::Text(value) if left + 1 == colon => value.clone(),
+                    _ => return Err(self.error_at(left, "object keys must be words or text")),
+                };
+                let value = self.parse_expression_range(colon + 1, right)?;
+                entries.push((key, value));
+            }
+            return Ok(Expression::Object(entries));
+        }
+
+        if let Some(index) = self.find_last_token(start, end, TokenKind::Dot) {
+            if index == start || index + 1 >= end || self.word_at(index + 1).is_none() {
+                return Err(self.error_at(index, "expected a property name after `.`"));
+            }
+            let field = self.expect_word_at(index + 1)?;
+            return Ok(Expression::Field(Box::new(self.parse_expression_range(start, index)?), field));
         }
 
         if let Some(index) = self.find_last_word_operator(start, end, &["using"]) {
@@ -467,6 +620,30 @@ impl Parser {
         Ok(Condition::Truthy(self.parse_expression_range(start, end)?))
     }
 
+    fn parse_path_range(&self, start: usize, end: usize) -> Result<Vec<String>, BasisError> {
+        if start >= end {
+            return Err(self.error_at(start, "expected a variable or property path"));
+        }
+        let mut path = Vec::new();
+        let mut index = start;
+        path.push(self.word_at(index).ok_or_else(|| self.error_at(index, "expected a variable name"))?.to_string());
+        index += 1;
+        while index < end {
+            if !self.token_is(index, TokenKind::Dot) {
+                return Err(self.error_at(index, "expected `.` between property names"));
+            }
+            index += 1;
+            path.push(self.word_at(index).ok_or_else(|| self.error_at(index, "expected a property name"))?.to_string());
+            index += 1;
+        }
+        Ok(path)
+    }
+
+    fn starts_with_line_phrase(&self, phrase: &[&str]) -> bool {
+        let end = self.find_line_end(self.cursor);
+        self.starts_with_phrase(self.cursor, end, phrase)
+    }
+
     fn find_line_end(&self, start: usize) -> usize {
         self.find_boundary(start, self.tokens.len(), Boundary::Line)
     }
@@ -485,16 +662,43 @@ impl Parser {
         (index < end).then_some(index)
     }
 
+    fn find_first_top_level_kind(&self, start: usize, end: usize, kind: TokenKind) -> Option<usize> {
+        let mut depth = 0;
+        for index in start..end {
+            match &self.tokens[index].kind {
+                TokenKind::LeftBracket | TokenKind::LeftParen | TokenKind::LeftBrace => depth += 1,
+                TokenKind::RightBracket | TokenKind::RightParen | TokenKind::RightBrace => depth -= 1,
+                _ if depth == 0 && self.tokens[index].kind == kind => return Some(index),
+                _ => {}
+            }
+        }
+        None
+    }
+
+    fn find_last_token(&self, start: usize, end: usize, kind: TokenKind) -> Option<usize> {
+        let mut result = None;
+        let mut depth = 0;
+        for index in start..end {
+            match &self.tokens[index].kind {
+                TokenKind::LeftBracket | TokenKind::LeftParen | TokenKind::LeftBrace => depth += 1,
+                TokenKind::RightBracket | TokenKind::RightParen | TokenKind::RightBrace => depth -= 1,
+                _ if depth == 0 && self.tokens[index].kind == kind => result = Some(index),
+                _ => {}
+            }
+        }
+        result
+    }
+
     fn find_boundary(&self, start: usize, end: usize, boundary: Boundary<'_>) -> usize {
         let mut depth = 0;
         let mut index = start;
         while index < end {
             match &self.tokens[index].kind {
-                TokenKind::LeftBracket | TokenKind::LeftParen => {
+                TokenKind::LeftBracket | TokenKind::LeftParen | TokenKind::LeftBrace => {
                     depth += 1;
                     index += 1;
                 }
-                TokenKind::RightBracket | TokenKind::RightParen => {
+                TokenKind::RightBracket | TokenKind::RightParen | TokenKind::RightBrace => {
                     depth -= 1;
                     index += 1;
                 }
@@ -514,11 +718,11 @@ impl Parser {
         let mut index = start;
         while index + 2 < end {
             match &self.tokens[index].kind {
-                TokenKind::LeftBracket | TokenKind::LeftParen => {
+                TokenKind::LeftBracket | TokenKind::LeftParen | TokenKind::LeftBrace => {
                     depth += 1;
                     index += 1;
                 }
-                TokenKind::RightBracket | TokenKind::RightParen => {
+                TokenKind::RightBracket | TokenKind::RightParen | TokenKind::RightBrace => {
                     depth -= 1;
                     index += 1;
                 }
@@ -535,11 +739,11 @@ impl Parser {
         let mut index = start;
         while index < end {
             match &self.tokens[index].kind {
-                TokenKind::LeftBracket | TokenKind::LeftParen => {
+                TokenKind::LeftBracket | TokenKind::LeftParen | TokenKind::LeftBrace => {
                     depth += 1;
                     index += 1;
                 }
-                TokenKind::RightBracket | TokenKind::RightParen => {
+                TokenKind::RightBracket | TokenKind::RightParen | TokenKind::RightBrace => {
                     depth -= 1;
                     index += 1;
                 }
@@ -558,8 +762,8 @@ impl Parser {
         let mut depth = 0;
         for index in start..end {
             match &self.tokens[index].kind {
-                TokenKind::LeftBracket | TokenKind::LeftParen => depth += 1,
-                TokenKind::RightBracket | TokenKind::RightParen => depth -= 1,
+                TokenKind::LeftBracket | TokenKind::LeftParen | TokenKind::LeftBrace => depth += 1,
+                TokenKind::RightBracket | TokenKind::RightParen | TokenKind::RightBrace => depth -= 1,
                 _ if depth == 0 && self.word_at(index).is_some_and(|word| words.contains(&word)) => result = Some(index),
                 _ => {}
             }
@@ -571,14 +775,18 @@ impl Parser {
         start + phrase.len() <= end && phrase.iter().enumerate().all(|(offset, word)| self.word_at(start + offset) == Some(*word))
     }
 
+    fn expect_word_at(&self, index: usize) -> Result<String, BasisError> {
+        self.word_at(index).map(str::to_string).ok_or_else(|| self.error_at(index, "expected a property name"))
+    }
+
     fn split_ranges(&self, start: usize, end: usize, separator: TokenKind) -> Vec<(usize, usize)> {
         let mut ranges = Vec::new();
         let mut range_start = start;
         let mut depth = 0;
         for index in start..end {
             match &self.tokens[index].kind {
-                TokenKind::LeftBracket | TokenKind::LeftParen => depth += 1,
-                TokenKind::RightBracket | TokenKind::RightParen => depth -= 1,
+                TokenKind::LeftBracket | TokenKind::LeftParen | TokenKind::LeftBrace => depth += 1,
+                TokenKind::RightBracket | TokenKind::RightParen | TokenKind::RightBrace => depth -= 1,
                 _ if depth == 0 && self.tokens[index].kind == separator => {
                     ranges.push((range_start, index));
                     range_start = index + 1;
@@ -597,9 +805,9 @@ impl Parser {
     fn matching_delimiter(&self, start: usize, end: usize) -> Option<usize> {
         let mut depth = 0;
         for index in start..end {
-            if self.token_is(index, TokenKind::LeftParen) || self.token_is(index, TokenKind::LeftBracket) {
+            if self.token_is(index, TokenKind::LeftParen) || self.token_is(index, TokenKind::LeftBracket) || self.token_is(index, TokenKind::LeftBrace) {
                 depth += 1;
-            } else if self.token_is(index, TokenKind::RightParen) || self.token_is(index, TokenKind::RightBracket) {
+            } else if self.token_is(index, TokenKind::RightParen) || self.token_is(index, TokenKind::RightBracket) || self.token_is(index, TokenKind::RightBrace) {
                 depth -= 1;
                 if depth == 0 {
                     return Some(index);
@@ -619,6 +827,10 @@ impl Parser {
             TokenKind::RightBracket => "]".to_string(),
             TokenKind::LeftParen => "(".to_string(),
             TokenKind::RightParen => ")".to_string(),
+            TokenKind::LeftBrace => "{".to_string(),
+            TokenKind::RightBrace => "}".to_string(),
+            TokenKind::Colon => ":".to_string(),
+            TokenKind::Dot => ".".to_string(),
             TokenKind::Operator(value) => value.clone(),
             TokenKind::Symbol(value) => value.to_string(),
             TokenKind::Newline | TokenKind::End => String::new(),
@@ -724,8 +936,10 @@ impl Parser {
     }
 
     fn error_at(&self, index: usize, message: impl Into<String>) -> BasisError {
-        let line = self.tokens.get(index).or_else(|| self.tokens.last()).map(|token| token.span.line).unwrap_or(1);
-        BasisError::new(line, message)
+        let token = self.tokens.get(index).or_else(|| self.tokens.last());
+        let line = token.map(|token| token.span.line).unwrap_or(1);
+        let column = token.map(|token| token.span.column).unwrap_or(1);
+        BasisError::at(line, column, message)
     }
 }
 
