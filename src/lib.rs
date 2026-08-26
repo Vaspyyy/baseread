@@ -81,6 +81,7 @@ pub enum Expression {
     FolderExists(Box<Expression>),
     ListFiles(Box<Expression>),
     ListFolders(Box<Expression>),
+    ListApplications,
     Add(Box<Expression>, Box<Expression>),
     Subtract(Box<Expression>, Box<Expression>),
     Multiply(Box<Expression>, Box<Expression>),
@@ -311,6 +312,9 @@ fn parse_expression(source: &str, line: usize) -> Result<Expression, BasisError>
     }
     if source == "current folder" {
         return Ok(Expression::CurrentFolder);
+    }
+    if source == "list applications" {
+        return Ok(Expression::ListApplications);
     }
     if let Some(path) = source.strip_prefix("file exists ") {
         return Ok(Expression::FileExists(Box::new(parse_expression(path, line)?)));
@@ -659,6 +663,7 @@ fn evaluate(expression: &Expression, environment: &mut Environment, output: &mut
         }
         Expression::ListFiles(path) => list_directory(path, environment, output, false),
         Expression::ListFolders(path) => list_directory(path, environment, output, true),
+        Expression::ListApplications => Ok(Value::List(list_applications().into_iter().map(|entry| Value::Text(entry.name)).collect())),
         Expression::Add(left, right) => numeric_operation(left, right, environment, output, |left, right| left + right),
         Expression::Subtract(left, right) => numeric_operation(left, right, environment, output, |left, right| left - right),
         Expression::Multiply(left, right) => numeric_operation(left, right, environment, output, |left, right| left * right),
@@ -961,6 +966,23 @@ fn application_directories() -> Vec<PathBuf> {
     directories
 }
 
+fn list_applications() -> Vec<DesktopEntry> {
+    let mut entries_by_id = HashMap::new();
+    for directory in application_directories() {
+        let Ok(entries) = fs::read_dir(directory) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("desktop") { continue; }
+            if let Some(desktop_entry) = read_desktop_entry(&path) {
+                entries_by_id.entry(desktop_entry.id.clone()).or_insert(desktop_entry);
+            }
+        }
+    }
+    let mut applications = entries_by_id.into_values().collect::<Vec<_>>();
+    applications.sort_by(|left, right| left.name.cmp(&right.name).then_with(|| left.id.cmp(&right.id)));
+    applications
+}
+
 fn read_desktop_entry(path: &Path) -> Option<DesktopEntry> {
     let source = fs::read_to_string(path).ok()?;
     let mut in_desktop_entry = false;
@@ -1084,6 +1106,7 @@ mod tests {
         let program = parse("run firefox with \"--private-window\"").unwrap();
         assert!(matches!(program.statements.as_slice(), [Statement::Run { application, arguments }] if application == "firefox" && arguments.len() == 1));
         assert!(matches!(parse("start shell \"long-running-command\"").unwrap().statements.as_slice(), [Statement::StartShell(_)]));
+        assert!(matches!(parse("say list applications").unwrap().statements.as_slice(), [Statement::Say(Expression::ListApplications)]));
     }
 
     #[test]
