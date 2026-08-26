@@ -96,7 +96,11 @@ impl BasisError {
 
 impl fmt::Display for BasisError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "line {}: {}", self.line, self.message)
+        if self.line == 0 {
+            write!(f, "{}", self.message)
+        } else {
+            write!(f, "line {}: {}", self.line, self.message)
+        }
     }
 }
 
