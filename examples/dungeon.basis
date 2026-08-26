@@ -11,12 +11,13 @@ set enemies to [
     { name: "goblin", damage: 5, reward: 5 }
 ]
 
-define fight using enemy, do
+define fight using player, enemy, do
     say "A {enemy.name} appears!"
     set damage to random integer from 1 to enemy.damage
     set player.health to player.health minus damage
     set player.gold to player.gold plus enemy.reward
     say "You take {damage} damage and find {enemy.reward} gold."
+    return player
 end
 
 while player.health is greater than 0
@@ -27,7 +28,7 @@ while player.health is greater than 0
 
     when action is "explore", do
         set enemy to random choice from enemies
-        fight using enemy
+        set player to fight using player, enemy
     end
 
     when action is "rest", do
