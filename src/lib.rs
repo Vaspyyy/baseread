@@ -1042,7 +1042,7 @@ fn application_match_score(query: &str, entry: &DesktopEntry) -> Option<usize> {
     if query.is_empty() { return None; }
     let names = [entry.name.as_str(), entry.id.as_str(), entry.path.file_stem()?.to_str()?];
     let best = names.iter().map(|name| levenshtein(&query, &normalize_application_name(name))).min()?;
-    let allowed = if query.chars().count() >= 7 { 2 } else { 1 };
+    let allowed = if query.chars().count() >= 5 { 2 } else { 1 };
     (best <= allowed).then_some(best)
 }
 
@@ -1133,6 +1133,7 @@ mod tests {
     fn accepts_small_application_name_typos() {
         let entry = DesktopEntry { id: "firefox".into(), name: "Firefox".into(), exec: "firefox %u".into(), path: PathBuf::from("firefox.desktop") };
         assert_eq!(application_match_score("firefokx", &entry), Some(1));
+        assert_eq!(application_match_score("firefzz", &entry), Some(2));
     }
 
     #[test]
