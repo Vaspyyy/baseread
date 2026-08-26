@@ -11,6 +11,7 @@ use std::{
 
 pub mod lexer;
 pub mod parser;
+mod codegen;
 pub use lexer::{lex, Span, Token, TokenKind};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -565,8 +566,8 @@ pub fn run_file(path: impl AsRef<Path>) -> Result<Vec<String>, Box<dyn std::erro
 /// Build a standalone native executable by embedding the validated BASISREAD
 /// source and runtime in a generated Rust program. This bootstrap backend will
 /// be replaced by direct AST code generation once the language core settles.
-pub fn compile_source(source: &str, output_path: impl AsRef<Path>, runtime_source: &str, lexer_source: &str, parser_source: &str) -> Result<(), Box<dyn std::error::Error>> {
-    parse(source)?;
+pub fn compile_source(source: &str, output_path: impl AsRef<Path>, runtime_source: &str, lexer_source: &str, parser_source: &str, codegen_source: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let program = parse(source)?;
     let output_path = output_path.as_ref();
     if let Some(parent) = output_path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
         fs::create_dir_all(parent)?;
@@ -580,9 +581,8 @@ pub fn compile_source(source: &str, output_path: impl AsRef<Path>, runtime_sourc
     fs::write(&runtime_path, runtime_source)?;
     fs::write(build_directory.join("lexer.rs"), lexer_source)?;
     fs::write(build_directory.join("parser.rs"), parser_source)?;
-    fs::write(&main_path, format!(
-        "#[path = \"basisread_runtime.rs\"]\nmod basisread;\n\nconst PROGRAM: &str = {source:?};\n\nfn main() {{\n    match basisread::parse(PROGRAM).and_then(|program| basisread::run(&program)) {{\n        Ok(lines) => for line in lines {{ println!(\"{{line}}\"); }},\n        Err(error) => {{ eprintln!(\"BASISREAD error: {{error}}\"); std::process::exit(1); }}\n    }}\n}}\n"
-    ))?;
+    fs::write(build_directory.join("codegen.rs"), codegen_source)?;
+    fs::write(&main_path, codegen::native_main(&program))?;
 
     let result = Command::new("rustc")
         .arg("--edition=2021")
