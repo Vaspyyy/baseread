@@ -216,7 +216,7 @@ fn parse_block(lines: &[(usize, &str)], cursor: &mut usize, nested: bool, stop_a
             *cursor += 1;
         } else if let Some(rest) = line.strip_prefix("define ") {
             let (header, marker) = rest.split_once(", do").ok_or_else(|| BasisError::new(line_number, "expected `define name using arguments, do`"))?;
-            let (name, args) = header.split_once(" using ").ok_or_else(|| BasisError::new(line_number, "expected `using` in function definition"))?;
+            let (name, args) = header.split_once(" using ").unwrap_or((header, ""));
             let parameters = if args.trim().is_empty() { Vec::new() } else { args.split(',').map(|arg| arg.trim().to_string()).collect() };
             if marker.trim() != "" { return Err(BasisError::new(line_number, "unexpected text after `do`")); }
             *cursor += 1;
@@ -450,7 +450,19 @@ fn execute_block(statements: &[Statement], environment: &mut Environment, output
 fn evaluate(expression: &Expression, environment: &mut Environment, output: &mut Vec<String>) -> Result<Value, BasisError> {
     match expression {
         Expression::Literal(value) => Ok(value.clone()),
-        Expression::Variable(name) => environment.variables.get(name).cloned().ok_or_else(|| BasisError::new(0, format!("unknown variable `{name}`"))),
+        Expression::Variable(name) => {
+            if let Some(value) = environment.variables.get(name).cloned() {
+                Ok(value)
+            } else if let Some(function) = environment.functions.get(name).cloned() {
+                if !function.parameters.is_empty() {
+                    return Err(BasisError::new(0, format!("function `{name}` expects {} arguments", function.parameters.len())));
+                }
+                let mut local = Environment { variables: environment.variables.clone(), functions: environment.functions.clone() };
+                Ok(execute_block(&function.body, &mut local, output, 0)?.unwrap_or(Value::Nothing))
+            } else {
+                Err(BasisError::new(0, format!("unknown variable or function `{name}`")))
+            }
+        }
         Expression::List(expressions) => Ok(Value::List(expressions.iter().map(|expression| evaluate(expression, environment, output)).collect::<Result<_, _>>()?)),
         Expression::ReadFile(path) => {
             let path = value_as_text(path, environment, output)?;
@@ -832,5 +844,16 @@ mod tests {
             say greet using "Ransom"
         "#;
         assert_eq!(run(&parse(source).unwrap()).unwrap(), vec!["Hello, Ransom"]);
+    }
+
+    #[test]
+    fn supports_zero_argument_functions() {
+        let source = r#"
+            define hello, do
+                return "Hello"
+            end
+            say hello
+        "#;
+        assert_eq!(run(&parse(source).unwrap()).unwrap(), vec!["Hello"]);
     }
 }
