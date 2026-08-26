@@ -278,7 +278,7 @@ fn parse_expression(source: &str, line: usize) -> Result<Expression, BasisError>
         return Ok(Expression::Multiply(Box::new(parse_expression(left, line)?), Box::new(parse_expression(right, line)?)));
     }
     if source.starts_with('"') && source.ends_with('"') && source.len() >= 2 {
-        return Ok(Expression::Literal(Value::Text(source[1..source.len() - 1].replace("\\\"", "\""))));
+        return Ok(Expression::Literal(Value::Text(unescape_text(&source[1..source.len() - 1]))));
     }
     if source == "true" { return Ok(Expression::Literal(Value::Boolean(true))); }
     if source == "false" { return Ok(Expression::Literal(Value::Boolean(false))); }
@@ -318,6 +318,30 @@ fn parse_expression(source: &str, line: usize) -> Result<Expression, BasisError>
         return Ok(Expression::Variable(source.to_string()));
     }
     Err(BasisError::new(line, format!("cannot understand expression `{source}`")))
+}
+
+fn unescape_text(source: &str) -> String {
+    let mut text = String::new();
+    let mut escaped = false;
+    for character in source.chars() {
+        if escaped {
+            text.push(match character {
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                '\\' => '\\',
+                '"' => '"',
+                other => other,
+            });
+            escaped = false;
+        } else if character == '\\' {
+            escaped = true;
+        } else {
+            text.push(character);
+        }
+    }
+    if escaped { text.push('\\'); }
+    text
 }
 
 fn parse_condition(source: &str, line: usize) -> Result<Condition, BasisError> {
@@ -1126,5 +1150,11 @@ mod tests {
             say "Hello, {name}!"
         "#;
         assert_eq!(run(&parse(source).unwrap()).unwrap(), vec!["Hello, Ransom!"]);
+    }
+
+    #[test]
+    fn unescapes_text_literals() {
+        let source = r#"say "line one\nline two\tend""#;
+        assert_eq!(run(&parse(source).unwrap()).unwrap(), vec!["line one\nline two\tend"]);
     }
 }
