@@ -13,6 +13,7 @@ jobs:
       - run: cargo test --all-targets
       - run: cargo run -- --check examples/backup.basis
       - run: cargo run -- --check examples/dungeon.basis
+      - run: cargo run -- --check examples/input-smoke.basis
       - run: cargo run -- build examples/hello.basis -o /tmp/basisread-hello
       - run: test "$(/tmp/basisread-hello)" = "Hello, Ransom"
       - run: cargo run -- build examples/game-smoke.basis -o /tmp/basisread-game-smoke
@@ -20,3 +21,5 @@ jobs:
           test "$(/tmp/basisread-game-smoke | tr '\n' '|')" = "Health: 21|1|"
       - run: cargo run -- build examples/screen-smoke.basis -o /tmp/basisread-screen-smoke
       - run: test "$(/tmp/basisread-screen-smoke | tail -n 1)" = "done"
+      - run: cargo run -- build examples/input-smoke.basis -o /tmp/basisread-input-smoke
+      - run: test "$(/tmp/basisread-input-smoke)" = "false"
