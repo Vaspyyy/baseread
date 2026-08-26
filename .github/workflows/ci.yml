@@ -12,5 +12,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --all-targets
       - run: cargo run -- --check examples/backup.basis
+      - run: cargo run -- --check examples/dungeon.basis
       - run: cargo run -- build examples/hello.basis -o /tmp/basisread-hello
       - run: test "$(/tmp/basisread-hello)" = "Hello, Ransom"
