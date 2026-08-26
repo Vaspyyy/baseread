@@ -884,7 +884,7 @@ mod tests {
             "create folder \"{}\"\nwrite \"hello\" to file \"{}\"\nwhen folder exists \"{}\", do\n say \"folder present\"\nend\nwhen file exists \"{}\", do\n say read file \"{}\"\nend\ncopy \"{}\" to \"{}\"\nset files to list files in \"{}\"\nfor each file in files, do\n say file\nend\nshell \"printf shell\"\ndelete folder \"{}\"",
             root.display(), input.display(), root.display(), input.display(), input.display(), input.display(), copy.display(), root.display(), root.display()
         );
-        assert_eq!(run(&parse(&source).unwrap()).unwrap(), vec!["folder present", "hello", copy.display().to_string(), input.display().to_string(), "shell"]);
+        assert_eq!(run(&parse(&source).unwrap()).unwrap(), vec!["folder present".to_string(), "hello".to_string(), copy.display().to_string(), input.display().to_string(), "shell".to_string()]);
         assert!(!root.exists());
     }
 
