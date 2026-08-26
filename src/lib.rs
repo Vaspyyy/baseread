@@ -899,7 +899,7 @@ pub fn run_file(path: impl AsRef<Path>) -> Result<Vec<String>, Box<dyn std::erro
 /// Build a standalone native executable by embedding the validated BASISREAD
 /// source and runtime in a generated Rust program. This bootstrap backend will
 /// be replaced by direct AST code generation once the language core settles.
-pub fn compile_source(source: &str, output_path: impl AsRef<Path>, runtime_source: &str) -> Result<(), Box<dyn std::error::Error>> {
+pub fn compile_source(source: &str, output_path: impl AsRef<Path>, runtime_source: &str, lexer_source: &str) -> Result<(), Box<dyn std::error::Error>> {
     parse(source)?;
     let output_path = output_path.as_ref();
     if let Some(parent) = output_path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
@@ -912,6 +912,7 @@ pub fn compile_source(source: &str, output_path: impl AsRef<Path>, runtime_sourc
     let runtime_path = build_directory.join("basisread_runtime.rs");
     let main_path = build_directory.join("main.rs");
     fs::write(&runtime_path, runtime_source)?;
+    fs::write(build_directory.join("lexer.rs"), lexer_source)?;
     fs::write(&main_path, format!(
         "#[path = \"basisread_runtime.rs\"]\nmod basisread;\n\nconst PROGRAM: &str = {source:?};\n\nfn main() {{\n    match basisread::parse(PROGRAM).and_then(|program| basisread::run(&program)) {{\n        Ok(lines) => for line in lines {{ println!(\"{{line}}\"); }},\n        Err(error) => {{ eprintln!(\"BASISREAD error: {{error}}\"); std::process::exit(1); }}\n    }}\n}}\n"
     ))?;
