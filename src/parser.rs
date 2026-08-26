@@ -69,6 +69,22 @@ impl Parser {
             self.finish_line()?;
             return Ok(Statement::ClearTerminal);
         }
+        if self.starts_with_line_phrase(&["draw", "text"]) {
+            return self.parse_draw_text();
+        }
+        if self.starts_with_line_phrase(&["clear", "screen"]) {
+            self.cursor += 2;
+            self.finish_line()?;
+            return Ok(Statement::ClearScreenBuffer);
+        }
+        if self.starts_with_line_phrase(&["render", "screen"]) {
+            self.cursor += 2;
+            self.finish_line()?;
+            return Ok(Statement::RenderScreen);
+        }
+        if self.starts_with_line_phrase(&["resize", "screen"]) {
+            return self.parse_resize_screen();
+        }
         if self.is_word("add") {
             return self.parse_list_add_or_remove(true);
         }
@@ -273,6 +289,32 @@ impl Parser {
         let y = self.parse_expression_line()?;
         self.finish_line()?;
         Ok(Statement::MoveCursor { x, y })
+    }
+
+    fn parse_draw_text(&mut self) -> Result<Statement, BasisError> {
+        self.expect_word("draw")?;
+        self.expect_word("text")?;
+        let line_end = self.find_line_end(self.cursor);
+        let at = self.find_first_word(self.cursor, line_end, "at").ok_or_else(|| self.error_here("expected `at x, y` after draw text"))?;
+        let text = self.parse_expression_range(self.cursor, at)?;
+        self.cursor = at;
+        self.expect_word("at")?;
+        let x = self.parse_expression_until_comma()?;
+        self.expect_comma()?;
+        let y = self.parse_expression_line()?;
+        self.finish_line()?;
+        Ok(Statement::DrawText { text, x, y })
+    }
+
+    fn parse_resize_screen(&mut self) -> Result<Statement, BasisError> {
+        self.expect_word("resize")?;
+        self.expect_word("screen")?;
+        self.expect_word("to")?;
+        let width = self.parse_expression_until_comma()?;
+        self.expect_comma()?;
+        let height = self.parse_expression_line()?;
+        self.finish_line()?;
+        Ok(Statement::ResizeScreen { width, height })
     }
 
     fn parse_save(&mut self) -> Result<Statement, BasisError> {
@@ -575,6 +617,15 @@ impl Parser {
         }
         if self.starts_with_phrase(start, end, &["terminal", "height"]) && start + 2 == end {
             return Ok(Expression::TerminalHeight);
+        }
+        if self.starts_with_phrase(start, end, &["screen", "width"]) && start + 2 == end {
+            return Ok(Expression::ScreenWidth);
+        }
+        if self.starts_with_phrase(start, end, &["screen", "height"]) && start + 2 == end {
+            return Ok(Expression::ScreenHeight);
+        }
+        if self.word_at(start) == Some("timer") && start + 1 == end {
+            return Ok(Expression::Timer);
         }
 
         if self.token_is(start, TokenKind::LeftBracket) && self.token_is(end - 1, TokenKind::RightBracket) {
