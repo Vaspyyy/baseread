@@ -4,7 +4,7 @@ use std::{
     env,
     fmt,
     fs,
-    io::{self, Write},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
     process::Command,
     rc::Rc,
@@ -59,6 +59,10 @@ pub enum Statement {
     SetEnvironment { name: Expression, value: Expression },
     SeedRandom(Expression),
     Say(Expression),
+    SayColored { expression: Expression, color: String },
+    MoveCursor { x: Expression, y: Expression },
+    HideCursor,
+    ShowCursor,
     Run { application: String, arguments: Vec<Expression> },
     CreateFolder(Expression),
     Copy { source: Expression, destination: Expression },
@@ -96,6 +100,7 @@ pub enum Expression {
     Object(Vec<(String, Expression)>),
     Field(Box<Expression>, String),
     Ask(Box<Expression>),
+    AskKey,
     ReadFile(Box<Expression>),
     LoadFile(Box<Expression>),
     Length(Box<Expression>),
@@ -107,6 +112,8 @@ pub enum Expression {
     ListFiles(Box<Expression>),
     ListFolders(Box<Expression>),
     ListApplications,
+    TerminalWidth,
+    TerminalHeight,
     RandomNumber { lower: Option<Box<Expression>>, upper: Option<Box<Expression>>, integer: bool },
     RandomChoice(Box<Expression>),
     Minimum(Box<Expression>, Box<Expression>),
@@ -311,6 +318,34 @@ fn execute_block(statements: &[Statement], environment: &mut Environment, output
                 }
                 output.push(text);
             }
+            Statement::SayColored { expression, color } => {
+                let text = evaluate(expression, environment, output)?.to_string();
+                if environment.interactive {
+                    print!("{}{}\x1b[0m\n", color_code(color), text);
+                    io::stdout().flush().map_err(|error| BasisError::new(0, format!("could not show colored text: {error}")))?;
+                }
+                output.push(text);
+            }
+            Statement::MoveCursor { x, y } => {
+                let x = terminal_coordinate(x, environment, output, "x")?;
+                let y = terminal_coordinate(y, environment, output, "y")?;
+                if environment.interactive {
+                    print!("\x1b[{y};{x}H");
+                    io::stdout().flush().map_err(|error| BasisError::new(0, format!("could not position cursor: {error}")))?;
+                }
+            }
+            Statement::HideCursor => {
+                if environment.interactive {
+                    print!("\x1b[?25l");
+                    io::stdout().flush().map_err(|error| BasisError::new(0, format!("could not hide cursor: {error}")))?;
+                }
+            }
+            Statement::ShowCursor => {
+                if environment.interactive {
+                    print!("\x1b[?25h");
+                    io::stdout().flush().map_err(|error| BasisError::new(0, format!("could not show cursor: {error}")))?;
+                }
+            }
             Statement::Run { application, arguments } => {
                 let arguments = arguments.iter().map(|argument| evaluate(argument, environment, output).map(|value| value.to_string())).collect::<Result<_, _>>()?;
                 launch_application(application, arguments)?;
@@ -490,6 +525,7 @@ fn evaluate(expression: &Expression, environment: &mut Environment, output: &mut
             }
         }
         Expression::Ask(prompt) => ask_value(prompt, environment, output),
+        Expression::AskKey => ask_key_value(environment),
         Expression::ReadFile(path) => {
             let path = value_as_path(path, environment, output)?;
             Ok(Value::Text(fs::read_to_string(&path).map_err(|error| BasisError::new(0, format!("could not read file `{}`: {error}", path.display())))?))
@@ -543,6 +579,8 @@ fn evaluate(expression: &Expression, environment: &mut Environment, output: &mut
         Expression::ListFiles(path) => list_directory(path, environment, output, false),
         Expression::ListFolders(path) => list_directory(path, environment, output, true),
         Expression::ListApplications => Ok(Value::List(list_applications().into_iter().map(|entry| Value::Text(entry.name)).collect())),
+        Expression::TerminalWidth => Ok(Value::Number(terminal_dimension("COLUMNS", "cols", 80.0))),
+        Expression::TerminalHeight => Ok(Value::Number(terminal_dimension("LINES", "lines", 24.0))),
         Expression::RandomNumber { lower, upper, integer } => random_number(lower.as_deref(), upper.as_deref(), *integer, environment, output),
         Expression::RandomChoice(value) => {
             let value = evaluate(value, environment, output)?;
@@ -618,6 +656,86 @@ fn ask_value(prompt: &Expression, environment: &mut Environment, output: &mut Ve
         return Err(BasisError::new(0, "ask needs input; use run_interactive or run_with_input"));
     };
     Ok(Value::Text(answer))
+}
+
+fn ask_key_value(environment: &mut Environment) -> Result<Value, BasisError> {
+    if let Some(answer) = environment.input.borrow_mut().pop_front() {
+        return Ok(Value::Text(answer.chars().next().map(|character| character.to_string()).unwrap_or_default()));
+    }
+    if !environment.interactive {
+        return Err(BasisError::new(0, "ask key needs input; use run_interactive or run_with_input"));
+    }
+
+    let saved = Command::new("stty")
+        .arg("-g")
+        .output()
+        .map_err(|error| BasisError::new(0, format!("could not inspect terminal mode: {error}")))?;
+    if !saved.status.success() {
+        return Err(BasisError::new(0, "could not inspect terminal mode"));
+    }
+    let saved_mode = String::from_utf8_lossy(&saved.stdout).trim().to_string();
+    let mode = Command::new("stty")
+        .args(["-icanon", "min", "1", "time", "0"])
+        .status()
+        .map_err(|error| BasisError::new(0, format!("could not enable single-key input: {error}")))?;
+    if !mode.success() {
+        return Err(BasisError::new(0, "could not enable single-key input"));
+    }
+
+    let mut byte = [0_u8; 1];
+    let read_result = io::stdin().read_exact(&mut byte);
+    let restore_result = Command::new("stty").arg(&saved_mode).status();
+    if let Err(error) = read_result {
+        return Err(BasisError::new(0, format!("could not read key: {error}")));
+    }
+    let restored = restore_result.map_err(|error| BasisError::new(0, format!("could not restore terminal mode: {error}")))?;
+    if !restored.success() {
+        return Err(BasisError::new(0, "could not restore terminal mode"));
+    }
+    Ok(Value::Text(String::from_utf8_lossy(&byte).to_string()))
+}
+
+fn color_code(color: &str) -> &'static str {
+    match color.to_ascii_lowercase().as_str() {
+        "black" => "\x1b[30m",
+        "red" => "\x1b[31m",
+        "green" => "\x1b[32m",
+        "yellow" => "\x1b[33m",
+        "blue" => "\x1b[34m",
+        "magenta" => "\x1b[35m",
+        "cyan" => "\x1b[36m",
+        "white" => "\x1b[37m",
+        "gray" | "grey" => "\x1b[90m",
+        "bright black" => "\x1b[90m",
+        "bright red" => "\x1b[91m",
+        "bright green" => "\x1b[92m",
+        "bright yellow" => "\x1b[93m",
+        "bright blue" => "\x1b[94m",
+        "bright magenta" => "\x1b[95m",
+        "bright cyan" => "\x1b[96m",
+        "bright white" => "\x1b[97m",
+        _ => "\x1b[0m",
+    }
+}
+
+fn terminal_coordinate(expression: &Expression, environment: &mut Environment, output: &mut Vec<String>, axis: &str) -> Result<usize, BasisError> {
+    let value = evaluate_number(expression, environment, output)?;
+    if !value.is_finite() || value < 1.0 || value.fract() != 0.0 || value > usize::MAX as f64 {
+        return Err(BasisError::new(0, format!("cursor {axis} coordinate must be a positive whole number")));
+    }
+    Ok(value as usize)
+}
+
+fn terminal_dimension(environment_name: &str, command_name: &str, fallback: f64) -> f64 {
+    if let Some(value) = env::var(environment_name).ok().and_then(|value| value.parse::<f64>().ok()).filter(|value| *value > 0.0) {
+        return value;
+    }
+    if let Ok(output) = Command::new("tput").arg(command_name).output() {
+        if let Ok(value) = String::from_utf8_lossy(&output.stdout).trim().parse::<f64>() {
+            if value > 0.0 { return value; }
+        }
+    }
+    fallback
 }
 
 fn random_number(
@@ -1623,5 +1741,22 @@ mod tests {
             end
         "#;
         assert_eq!(run(&parse(source).unwrap()).unwrap(), vec!["0", "1", "recovered"]);
+    }
+
+    #[test]
+    fn supports_terminal_game_controls_without_polluting_buffered_output() {
+        let source = r#"
+            set key to ask key
+            say "danger" in red
+            say terminal width
+            say terminal height
+            move cursor to 3, 4
+            hide cursor
+            show cursor
+        "#;
+        let output = run_with_input(&parse(source).unwrap(), &["x"]).unwrap();
+        assert_eq!(output[0..2], ["x", "danger"]);
+        assert!(output[2].parse::<f64>().unwrap() > 0.0);
+        assert!(output[3].parse::<f64>().unwrap() > 0.0);
     }
 }
