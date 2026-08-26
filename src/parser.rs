@@ -540,6 +540,9 @@ impl Parser {
             }
             return Ok(Expression::Ask(Box::new(self.parse_expression_range(start + 1, end)?)));
         }
+        if self.starts_with_phrase(start, end, &["key", "available"]) && start + 2 == end {
+            return Ok(Expression::KeyAvailable);
+        }
         if self.starts_with_phrase(start, end, &["load", "file"]) {
             if start + 2 >= end {
                 return Err(self.error_at(start, "expected a path after `load file`"));
