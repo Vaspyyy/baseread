@@ -1,4 +1,5 @@
 resize screen to 12, 3
 draw text "@" at 2, 2
+draw text "!" in red at 3, 2
 render screen
 say "done"
