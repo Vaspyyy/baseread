@@ -1908,6 +1908,20 @@ mod tests {
     }
 
     #[test]
+    fn functions_can_return_updated_dynamic_state() {
+        let source = r#"
+            set player to {health: 20}
+            define take damage using player, amount, do
+                set player.health to player.health minus amount
+                return player
+            end
+            set player to take damage using player, 3
+            say player.health
+        "#;
+        assert_eq!(run(&parse(source).unwrap()).unwrap(), vec!["17"]);
+    }
+
+    #[test]
     fn saves_and_loads_dynamic_game_state() {
         let suffix = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
         let path = std::env::temp_dir().join(format!("basisread-state-{suffix}.json"));
