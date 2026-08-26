@@ -109,6 +109,7 @@ pub enum Expression {
     LoadFile(Box<Expression>),
     Length(Box<Expression>),
     At(Box<Expression>, Box<Expression>),
+    KeyAvailable,
     EnvironmentVariable(Box<Expression>),
     CurrentFolder,
     FileExists(Box<Expression>),
@@ -278,6 +279,7 @@ struct Environment {
     functions: HashMap<String, Function>,
     interactive: bool,
     input: Rc<RefCell<VecDeque<String>>>,
+    pending_keys: Rc<RefCell<VecDeque<String>>>,
     random: Rc<RefCell<RandomState>>,
     screen: Rc<RefCell<ScreenBuffer>>,
     started: Instant,
@@ -290,6 +292,7 @@ impl Environment {
             functions: HashMap::new(),
             interactive: false,
             input: Rc::new(RefCell::new(VecDeque::new())),
+            pending_keys: Rc::new(RefCell::new(VecDeque::new())),
             random: Rc::new(RefCell::new(RandomState::new())),
             screen: Rc::new(RefCell::new(ScreenBuffer::from_terminal())),
             started: Instant::now(),
@@ -314,6 +317,7 @@ impl Environment {
             functions: self.functions.clone(),
             interactive: self.interactive,
             input: Rc::clone(&self.input),
+            pending_keys: Rc::clone(&self.pending_keys),
             random: Rc::clone(&self.random),
             screen: Rc::clone(&self.screen),
             started: self.started,
@@ -647,6 +651,7 @@ fn evaluate(expression: &Expression, environment: &mut Environment, output: &mut
                 (_, _) => Err(BasisError::new(0, "at requires text, a list, or an object")),
             }
         }
+        Expression::KeyAvailable => key_available_value(environment),
         Expression::EnvironmentVariable(name) => {
             let name = value_as_text(name, environment, output)?;
             Ok(env::var(name).map(Value::Text).unwrap_or(Value::Nothing))
@@ -746,6 +751,9 @@ fn ask_value(prompt: &Expression, environment: &mut Environment, output: &mut Ve
 }
 
 fn ask_key_value(environment: &mut Environment) -> Result<Value, BasisError> {
+    if let Some(answer) = environment.pending_keys.borrow_mut().pop_front() {
+        return Ok(Value::Text(answer));
+    }
     if let Some(answer) = environment.input.borrow_mut().pop_front() {
         return Ok(Value::Text(answer.chars().next().map(|character| character.to_string()).unwrap_or_default()));
     }
@@ -753,16 +761,44 @@ fn ask_key_value(environment: &mut Environment) -> Result<Value, BasisError> {
         return Err(BasisError::new(0, "ask key needs input; use run_interactive or run_with_input"));
     }
 
+    terminal_key(environment, true)?.ok_or_else(|| BasisError::new(0, "could not read key"))
+}
+
+fn key_available_value(environment: &mut Environment) -> Result<Value, BasisError> {
+    if !environment.pending_keys.borrow().is_empty() {
+        return Ok(Value::Boolean(true));
+    }
+    if !environment.interactive {
+        return Ok(Value::Boolean(!environment.input.borrow().is_empty()));
+    }
+
+    if let Some(key) = terminal_key(environment, false)? {
+        environment.pending_keys.borrow_mut().push_back(key);
+        Ok(Value::Boolean(true))
+    } else {
+        Ok(Value::Boolean(false))
+    }
+}
+
+fn terminal_key(environment: &mut Environment, wait_for_key: bool) -> Result<Option<String>, BasisError> {
+    if !environment.interactive {
+        return Ok(None);
+    }
+
     let saved = Command::new("stty")
         .arg("-g")
         .output()
         .map_err(|error| BasisError::new(0, format!("could not inspect terminal mode: {error}")))?;
     if !saved.status.success() {
+        if !wait_for_key {
+            return Ok(None);
+        }
         return Err(BasisError::new(0, "could not inspect terminal mode"));
     }
     let saved_mode = String::from_utf8_lossy(&saved.stdout).trim().to_string();
+    let minimum = if wait_for_key { "1" } else { "0" };
     let mode = Command::new("stty")
-        .args(["-icanon", "min", "1", "time", "0"])
+        .args(["-icanon", "-echo", "min", minimum, "time", "0"])
         .status()
         .map_err(|error| BasisError::new(0, format!("could not enable single-key input: {error}")))?;
     if !mode.success() {
@@ -770,16 +806,22 @@ fn ask_key_value(environment: &mut Environment) -> Result<Value, BasisError> {
     }
 
     let mut byte = [0_u8; 1];
-    let read_result = io::stdin().read_exact(&mut byte);
+    let read_result = if wait_for_key {
+        io::stdin().read_exact(&mut byte).map(|_| 1)
+    } else {
+        io::stdin().read(&mut byte)
+    };
     let restore_result = Command::new("stty").arg(&saved_mode).status();
-    if let Err(error) = read_result {
-        return Err(BasisError::new(0, format!("could not read key: {error}")));
-    }
+    let count = read_result.map_err(|error| BasisError::new(0, format!("could not read key: {error}")))?;
     let restored = restore_result.map_err(|error| BasisError::new(0, format!("could not restore terminal mode: {error}")))?;
     if !restored.success() {
         return Err(BasisError::new(0, "could not restore terminal mode"));
     }
-    Ok(Value::Text(String::from_utf8_lossy(&byte).to_string()))
+    if count == 0 {
+        Ok(None)
+    } else {
+        Ok(Some(String::from_utf8_lossy(&byte[..count]).to_string()))
+    }
 }
 
 fn color_code(color: &str) -> &'static str {
@@ -1869,6 +1911,22 @@ mod tests {
         assert_eq!(output[0..2], ["x", "danger"]);
         assert!(output[2].parse::<f64>().unwrap() > 0.0);
         assert!(output[3].parse::<f64>().unwrap() > 0.0);
+    }
+
+    #[test]
+    fn polls_scripted_key_input_without_consuming_it() {
+        let source = r#"
+            set ready to key available
+            set key to ask key
+            say ready
+            say key
+        "#;
+        assert_eq!(run_with_input(&parse(source).unwrap(), &["x"]).unwrap(), vec!["true", "x"]);
+    }
+
+    #[test]
+    fn reports_no_key_for_empty_buffered_input() {
+        assert_eq!(run(&parse("say key available").unwrap()).unwrap(), vec!["false"]);
     }
 
     #[test]
