@@ -84,7 +84,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>, BasisError> {
             while let Some((_, next)) = characters.next() {
                 end += next.len_utf8();
                 if next == '\n' || next == '\r' {
-                    return Err(BasisError::new(start_line, format!("unterminated string literal at column {start_column}")));
+                    return Err(BasisError::at(start_line, start_column, "unterminated string literal"));
                 }
                 if escaped {
                     value.push(unescape_character(next));
@@ -107,7 +107,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>, BasisError> {
             }
 
             if !closed {
-                return Err(BasisError::new(start_line, format!("unterminated string literal at column {start_column}")));
+                return Err(BasisError::at(start_line, start_column, "unterminated string literal"));
             }
             tokens.push(token(TokenKind::Text(value), start, end, start_line, start_column));
             continue;
@@ -152,7 +152,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>, BasisError> {
                     }
                 }
             }
-            let number = literal.parse::<f64>().map_err(|_| BasisError::new(start_line, format!("invalid number `{literal}` at column {start_column}")))?;
+            let number = literal.parse::<f64>().map_err(|_| BasisError::at(start_line, start_column, format!("invalid number `{literal}`")))?;
             tokens.push(token(TokenKind::Number(number), start, end, start_line, start_column));
             continue;
         }
