@@ -106,8 +106,9 @@ end
 say greet using "Ransom"
 ```
 
-Functions can read global values. A function with no parameters can be used as
-an expression by its name.
+Functions receive copied values in their local scope. Return updated objects
+or lists when a caller should keep the change. A function with no parameters
+can be used as an expression by its name.
 
 ## Input and randomness
 
