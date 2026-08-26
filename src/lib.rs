@@ -631,7 +631,7 @@ fn resolve_application_in(query: &str, directories: &[PathBuf]) -> Result<Deskto
         }
     }
 
-    let candidates = entries_by_id.into_values().filter_map(|desktop_entry| application_match_score(query, &desktop_entry).map(|score| (score, desktop_entry))).collect::<Vec<_>>();
+    let mut candidates = entries_by_id.into_values().filter_map(|desktop_entry| application_match_score(query, &desktop_entry).map(|score| (score, desktop_entry))).collect::<Vec<_>>();
 
     if candidates.is_empty() {
         return Err(BasisError::new(0, format!("could not find an application matching `{query}`")));
