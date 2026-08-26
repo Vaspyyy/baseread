@@ -51,6 +51,8 @@ pub enum Statement {
     WriteFile { content: Expression, path: Expression },
     Shell(Expression),
     OpenFile(Expression),
+    Stop,
+    Skip,
     When { condition: Condition, body: Vec<Statement>, otherwise: Option<Vec<Statement>> },
     Repeat { count: Expression, body: Vec<Statement> },
     While { condition: Condition, body: Vec<Statement> },
@@ -191,6 +193,12 @@ fn parse_block(lines: &[(usize, &str)], cursor: &mut usize, nested: bool, stop_a
             *cursor += 1;
         } else if let Some(path) = line.strip_prefix("open file ") {
             statements.push(Statement::OpenFile(parse_expression(path, line_number)?));
+            *cursor += 1;
+        } else if line == "stop" {
+            statements.push(Statement::Stop);
+            *cursor += 1;
+        } else if line == "skip" {
+            statements.push(Statement::Skip);
             *cursor += 1;
         } else if let Some(rest) = line.strip_prefix("when ") {
             let (condition, marker) = rest.split_once(", do").ok_or_else(|| BasisError::new(line_number, "expected `when condition, do`"))?;
@@ -393,11 +401,24 @@ impl Environment {
 pub fn run(program: &Program) -> Result<Vec<String>, BasisError> {
     let mut environment = Environment::new();
     let mut output = Vec::new();
-    execute_block(&program.statements, &mut environment, &mut output, 0)?;
+    match execute_block(&program.statements, &mut environment, &mut output, 0)? {
+        Flow::Next => {}
+        Flow::Return(_) => return Err(BasisError::new(0, "return can only be used inside a function")),
+        Flow::Break => return Err(BasisError::new(0, "stop can only be used inside a loop")),
+        Flow::Continue => return Err(BasisError::new(0, "skip can only be used inside a loop")),
+    }
     Ok(output)
 }
 
-fn execute_block(statements: &[Statement], environment: &mut Environment, output: &mut Vec<String>, line: usize) -> Result<Option<Value>, BasisError> {
+#[derive(Debug, Clone)]
+enum Flow {
+    Next,
+    Return(Value),
+    Break,
+    Continue,
+}
+
+fn execute_block(statements: &[Statement], environment: &mut Environment, output: &mut Vec<String>, line: usize) -> Result<Flow, BasisError> {
     for statement in statements {
         match statement {
             Statement::Set { name, value } => { let value = evaluate(value, environment, output)?; environment.variables.insert(name.clone(), value); }
@@ -443,22 +464,34 @@ fn execute_block(statements: &[Statement], environment: &mut Environment, output
                 let path = value_as_text(path, environment, output)?;
                 open_file(path)?;
             }
+            Statement::Stop => return Ok(Flow::Break),
+            Statement::Skip => return Ok(Flow::Continue),
             Statement::When { condition, body, otherwise } => {
                 if evaluate_condition(condition, environment, output)? {
-                    if let Some(value) = execute_block(body, environment, output, line)? { return Ok(Some(value)); }
+                    let flow = execute_block(body, environment, output, line)?;
+                    if !matches!(&flow, Flow::Next) { return Ok(flow); }
                 } else if let Some(otherwise) = otherwise {
-                    if let Some(value) = execute_block(otherwise, environment, output, line)? { return Ok(Some(value)); }
+                    let flow = execute_block(otherwise, environment, output, line)?;
+                    if !matches!(&flow, Flow::Next) { return Ok(flow); }
                 }
             }
             Statement::Repeat { count, body } => {
                 let count = evaluate_repeat_count(count, environment, output)?;
                 for _ in 0..count {
-                    if let Some(value) = execute_block(body, environment, output, line)? { return Ok(Some(value)); }
+                    match execute_block(body, environment, output, line)? {
+                        Flow::Next | Flow::Continue => {}
+                        Flow::Break => break,
+                        flow @ Flow::Return(_) => return Ok(flow),
+                    }
                 }
             }
             Statement::While { condition, body } => {
                 while evaluate_condition(condition, environment, output)? {
-                    if let Some(value) = execute_block(body, environment, output, line)? { return Ok(Some(value)); }
+                    match execute_block(body, environment, output, line)? {
+                        Flow::Next | Flow::Continue => {}
+                        Flow::Break => break,
+                        flow @ Flow::Return(_) => return Ok(flow),
+                    }
                 }
             }
             Statement::ForEach { name, iterable, body } => {
@@ -468,16 +501,20 @@ fn execute_block(statements: &[Statement], environment: &mut Environment, output
                 };
                 for value in values {
                     environment.variables.insert(name.clone(), value);
-                    if let Some(value) = execute_block(body, environment, output, line)? { return Ok(Some(value)); }
+                    match execute_block(body, environment, output, line)? {
+                        Flow::Next | Flow::Continue => {}
+                        Flow::Break => break,
+                        flow @ Flow::Return(_) => return Ok(flow),
+                    }
                 }
             }
             Statement::Define { name, parameters, body } => { environment.functions.insert(name.clone(), Function { parameters: parameters.clone(), body: body.clone() }); }
-            Statement::Return(expression) => return Ok(Some(evaluate(expression, environment, output)?)),
+            Statement::Return(expression) => return Ok(Flow::Return(evaluate(expression, environment, output)?)),
             Statement::Expression(expression) => { evaluate(expression, environment, output)?; }
         }
     }
     let _ = line;
-    Ok(None)
+    Ok(Flow::Next)
 }
 
 fn evaluate(expression: &Expression, environment: &mut Environment, output: &mut Vec<String>) -> Result<Value, BasisError> {
@@ -491,7 +528,7 @@ fn evaluate(expression: &Expression, environment: &mut Environment, output: &mut
                     return Err(BasisError::new(0, format!("function `{name}` expects {} arguments", function.parameters.len())));
                 }
                 let mut local = Environment { variables: environment.variables.clone(), functions: environment.functions.clone() };
-                Ok(execute_block(&function.body, &mut local, output, 0)?.unwrap_or(Value::Nothing))
+                function_result(execute_block(&function.body, &mut local, output, 0)?)
             } else {
                 Err(BasisError::new(0, format!("unknown variable or function `{name}`")))
             }
@@ -533,8 +570,17 @@ fn evaluate(expression: &Expression, environment: &mut Environment, output: &mut
             if function.parameters.len() != arguments.len() { return Err(BasisError::new(0, format!("function `{name}` expects {} arguments", function.parameters.len()))); }
             let mut local = Environment { variables: environment.variables.clone(), functions: environment.functions.clone() };
             for (parameter, argument) in function.parameters.iter().zip(arguments) { local.variables.insert(parameter.clone(), evaluate(argument, environment, output)?); }
-            Ok(execute_block(&function.body, &mut local, output, 0)?.unwrap_or(Value::Nothing))
+            function_result(execute_block(&function.body, &mut local, output, 0)?)
         }
+    }
+}
+
+fn function_result(flow: Flow) -> Result<Value, BasisError> {
+    match flow {
+        Flow::Next => Ok(Value::Nothing),
+        Flow::Return(value) => Ok(value),
+        Flow::Break => Err(BasisError::new(0, "stop cannot leave a function")),
+        Flow::Continue => Err(BasisError::new(0, "skip cannot leave a function")),
     }
 }
 
@@ -916,6 +962,24 @@ mod tests {
             say 1 plus 2 times 3
         "#;
         assert_eq!(run(&parse(source).unwrap()).unwrap(), vec!["0", "1", "2", "7"]);
+    }
+
+    #[test]
+    fn supports_stop_and_skip_in_loops() {
+        let source = r#"
+            set count to 0
+            repeat 5 times, do
+                set count to count plus 1
+                when count is 2, do
+                    skip
+                end
+                say count
+                when count is 4, do
+                    stop
+                end
+            end
+        "#;
+        assert_eq!(run(&parse(source).unwrap()).unwrap(), vec!["1", "3", "4"]);
     }
 
     #[test]
