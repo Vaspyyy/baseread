@@ -10,7 +10,7 @@ fn main() {
     };
 
     if first == "--version" {
-        println!("BASISREAD 0.2.0");
+        println!("BASISREAD 0.3.0");
         return;
     }
 
@@ -78,10 +78,8 @@ fn main() {
         std::process::exit(2);
     }
 
-    match basisread::run_file(first) {
-        Ok(lines) => {
-            for line in lines { println!("{line}"); }
-        }
+    match basisread::run_file_interactive(first) {
+        Ok(()) => {}
         Err(error) => {
             eprintln!("BASISREAD error: {error}");
             std::process::exit(1);
@@ -90,7 +88,7 @@ fn main() {
 }
 
 fn repl() {
-    println!("BASISREAD 0.2.0");
+    println!("BASISREAD 0.3.0");
     println!("Type `exit` to leave.");
     let stdin = io::stdin();
     let mut input = stdin.lock();
