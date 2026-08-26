@@ -1747,6 +1747,7 @@ mod tests {
     fn supports_terminal_game_controls_without_polluting_buffered_output() {
         let source = r#"
             set key to ask key
+            say key
             say "danger" in red
             say terminal width
             say terminal height
