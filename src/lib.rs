@@ -56,6 +56,10 @@ pub enum Expression {
     Literal(Value),
     Variable(String),
     List(Vec<Expression>),
+    Add(Box<Expression>, Box<Expression>),
+    Subtract(Box<Expression>, Box<Expression>),
+    Multiply(Box<Expression>, Box<Expression>),
+    Divide(Box<Expression>, Box<Expression>),
     Join(Box<Expression>, Box<Expression>),
     Call { name: String, arguments: Vec<Expression> },
 }
@@ -173,8 +177,20 @@ fn parse_block(lines: &[(usize, &str)], cursor: &mut usize, nested: bool) -> Res
 
 fn parse_expression(source: &str, line: usize) -> Result<Expression, BasisError> {
     let source = source.trim();
-    if let Some((left, right)) = source.split_once(" joined with ") {
+    if let Some((left, right)) = split_phrase(source, " joined with ") {
         return Ok(Expression::Join(Box::new(parse_expression(left, line)?), Box::new(parse_expression(right, line)?)));
+    }
+    if let Some((left, right)) = split_phrase(source, " plus ") {
+        return Ok(Expression::Add(Box::new(parse_expression(left, line)?), Box::new(parse_expression(right, line)?)));
+    }
+    if let Some((left, right)) = split_phrase(source, " minus ") {
+        return Ok(Expression::Subtract(Box::new(parse_expression(left, line)?), Box::new(parse_expression(right, line)?)));
+    }
+    if let Some((left, right)) = split_phrase(source, " divided by ") {
+        return Ok(Expression::Divide(Box::new(parse_expression(left, line)?), Box::new(parse_expression(right, line)?)));
+    }
+    if let Some((left, right)) = split_phrase(source, " times ") {
+        return Ok(Expression::Multiply(Box::new(parse_expression(left, line)?), Box::new(parse_expression(right, line)?)));
     }
     if source.starts_with('"') && source.ends_with('"') && source.len() >= 2 {
         return Ok(Expression::Literal(Value::Text(source[1..source.len() - 1].replace("\\\"", "\""))));
@@ -239,6 +255,29 @@ fn split_top_level(source: &str, separator: char) -> Vec<&str> {
     }
     pieces.push(&source[start..]);
     pieces
+}
+
+fn split_phrase<'a>(source: &'a str, phrase: &str) -> Option<(&'a str, &'a str)> {
+    let mut depth = 0;
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, character) in source.char_indices() {
+        if escaped { escaped = false; continue; }
+        if character == '\\' && quote.is_some() { escaped = true; continue; }
+        if quote == Some(character) {
+            quote = None;
+        } else if quote.is_none() && (character == '\'' || character == '"') {
+            quote = Some(character);
+        } else if quote.is_none() && character == '[' {
+            depth += 1;
+        } else if quote.is_none() && character == ']' {
+            depth -= 1;
+        }
+        if quote.is_none() && depth == 0 && source[index..].starts_with(phrase) {
+            return Some((&source[..index], &source[index + phrase.len()..]));
+        }
+    }
+    None
 }
 
 #[derive(Clone)]
@@ -309,6 +348,17 @@ fn evaluate(expression: &Expression, environment: &mut Environment, output: &mut
         Expression::Literal(value) => Ok(value.clone()),
         Expression::Variable(name) => environment.variables.get(name).cloned().ok_or_else(|| BasisError::new(0, format!("unknown variable `{name}`"))),
         Expression::List(expressions) => Ok(Value::List(expressions.iter().map(|expression| evaluate(expression, environment, output)).collect::<Result<_, _>>()?)),
+        Expression::Add(left, right) => numeric_operation(left, right, environment, output, |left, right| left + right),
+        Expression::Subtract(left, right) => numeric_operation(left, right, environment, output, |left, right| left - right),
+        Expression::Multiply(left, right) => numeric_operation(left, right, environment, output, |left, right| left * right),
+        Expression::Divide(left, right) => {
+            let right_value = evaluate(right, environment, output)?;
+            let Value::Number(right_value) = right_value else { return Err(BasisError::new(0, "division requires numbers")); };
+            if right_value == 0.0 { return Err(BasisError::new(0, "cannot divide by zero")); }
+            let left_value = evaluate(left, environment, output)?;
+            let Value::Number(left_value) = left_value else { return Err(BasisError::new(0, "division requires numbers")); };
+            Ok(Value::Number(left_value / right_value))
+        }
         Expression::Join(left, right) => Ok(Value::Text(format!("{}{}", evaluate(left, environment, output)?, evaluate(right, environment, output)?))),
         Expression::Call { name, arguments } => {
             let function = environment.functions.get(name).cloned().ok_or_else(|| BasisError::new(0, format!("unknown function `{name}`")))?;
@@ -318,6 +368,18 @@ fn evaluate(expression: &Expression, environment: &mut Environment, output: &mut
             Ok(execute_block(&function.body, &mut local, output, 0)?.unwrap_or(Value::Nothing))
         }
     }
+}
+
+fn numeric_operation<F>(left: &Expression, right: &Expression, environment: &mut Environment, output: &mut Vec<String>, operation: F) -> Result<Value, BasisError>
+where
+    F: Fn(f64, f64) -> f64,
+{
+    let left = evaluate(left, environment, output)?;
+    let right = evaluate(right, environment, output)?;
+    let (Value::Number(left), Value::Number(right)) = (left, right) else {
+        return Err(BasisError::new(0, "arithmetic requires numbers"));
+    };
+    Ok(Value::Number(operation(left, right)))
 }
 
 fn evaluate_condition(condition: &Condition, environment: &mut Environment, output: &mut Vec<String>) -> Result<bool, BasisError> {
@@ -588,5 +650,18 @@ mod tests {
             end
         "#;
         assert_eq!(run(&parse(source).unwrap()).unwrap(), vec!["Ada", "Grace"]);
+    }
+
+    #[test]
+    fn uses_arithmetic_to_drive_a_while_loop() {
+        let source = r#"
+            set counter to 0
+            while counter is less than 3, do
+                say counter
+                set counter to counter plus 1
+            end
+            say 1 plus 2 times 3
+        "#;
+        assert_eq!(run(&parse(source).unwrap()).unwrap(), vec!["0", "1", "2", "7"]);
     }
 }
