@@ -170,13 +170,15 @@ render it in one operation:
 resize screen to 40, 12
 clear screen
 draw text "@" at 5, 6
+draw text "!" in red at 6, 6
 draw text "Dungeon" at 15, 2
 render screen
 ```
 
 `screen width` and `screen height` report the current buffer size. Drawing is
 clipped at the buffer edges, and drawing a new frame replaces the old buffer
-only when you call `clear screen` or resize it.
+only when you call `clear screen` or resize it. Colored cells use the same
+terminal color names as `say`; buffered runs still return plain text.
 
 ## Recovering from errors
 
