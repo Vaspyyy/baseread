@@ -520,6 +520,7 @@ fn execute_block(statements: &[Statement], environment: &mut Environment, output
 
 fn evaluate(expression: &Expression, environment: &mut Environment, output: &mut Vec<String>) -> Result<Value, BasisError> {
     match expression {
+        Expression::Literal(Value::Text(value)) => Ok(Value::Text(interpolate_text(value, environment)?)),
         Expression::Literal(value) => Ok(value.clone()),
         Expression::Variable(name) => {
             if let Some(value) = environment.variables.get(name).cloned() {
@@ -590,6 +591,28 @@ fn value_as_text(expression: &Expression, environment: &mut Environment, output:
         Value::Text(value) => Ok(value),
         value => Err(BasisError::new(0, format!("expected text, got {value}"))),
     }
+}
+
+fn interpolate_text(template: &str, environment: &Environment) -> Result<String, BasisError> {
+    let mut result = String::new();
+    let mut remaining = template;
+    loop {
+        let Some(start) = remaining.find('{') else {
+            result.push_str(remaining);
+            break;
+        };
+        result.push_str(&remaining[..start]);
+        let after_start = &remaining[start + 1..];
+        let Some(end) = after_start.find('}') else {
+            result.push_str(&remaining[start..]);
+            break;
+        };
+        let name = after_start[..end].trim();
+        let value = environment.variables.get(name).ok_or_else(|| BasisError::new(0, format!("unknown interpolation variable `{name}`")))?;
+        result.push_str(&value.to_string());
+        remaining = &after_start[end + 1..];
+    }
+    Ok(result)
 }
 
 fn value_as_path(expression: &Expression, environment: &mut Environment, output: &mut Vec<String>) -> Result<PathBuf, BasisError> {
@@ -1040,5 +1063,14 @@ mod tests {
             assert_eq!(expand_path("~/basisread"), PathBuf::from(home).join("basisread"));
         }
         assert_eq!(expand_path("relative/file"), PathBuf::from("relative/file"));
+    }
+
+    #[test]
+    fn interpolates_variables_in_text() {
+        let source = r#"
+            set name to "Ransom"
+            say "Hello, {name}!"
+        "#;
+        assert_eq!(run(&parse(source).unwrap()).unwrap(), vec!["Hello, Ransom!"]);
     }
 }
