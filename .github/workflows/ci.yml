@@ -18,3 +18,5 @@ jobs:
       - run: cargo run -- build examples/game-smoke.basis -o /tmp/basisread-game-smoke
       - run: |
           test "$(/tmp/basisread-game-smoke | tr '\n' '|')" = "Health: 21|1|"
+      - run: cargo run -- build examples/screen-smoke.basis -o /tmp/basisread-screen-smoke
+      - run: test "$(/tmp/basisread-screen-smoke | tail -n 1)" = "done"
