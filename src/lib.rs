@@ -76,6 +76,9 @@ pub enum Expression {
 #[derive(Debug, Clone)]
 pub enum Condition {
     Truthy(Expression),
+    Not(Box<Condition>),
+    And(Box<Condition>, Box<Condition>),
+    Or(Box<Condition>, Box<Condition>),
     Equals(Expression, Expression),
     NotEquals(Expression, Expression),
     GreaterThan(Expression, Expression),
@@ -272,6 +275,15 @@ fn parse_expression(source: &str, line: usize) -> Result<Expression, BasisError>
 
 fn parse_condition(source: &str, line: usize) -> Result<Condition, BasisError> {
     let source = source.trim();
+    if let Some((left, right)) = split_phrase(source, " or ") {
+        return Ok(Condition::Or(Box::new(parse_condition(left, line)?), Box::new(parse_condition(right, line)?)));
+    }
+    if let Some((left, right)) = split_phrase(source, " and ") {
+        return Ok(Condition::And(Box::new(parse_condition(left, line)?), Box::new(parse_condition(right, line)?)));
+    }
+    if let Some(source) = source.strip_prefix("not ") {
+        return Ok(Condition::Not(Box::new(parse_condition(source, line)?)));
+    }
     if let Some((left, right)) = source.split_once(" is not ") {
         return Ok(Condition::NotEquals(parse_expression(left, line)?, parse_expression(right, line)?));
     }
@@ -459,7 +471,7 @@ fn evaluate(expression: &Expression, environment: &mut Environment, output: &mut
         Expression::Call { name, arguments } => {
             let function = environment.functions.get(name).cloned().ok_or_else(|| BasisError::new(0, format!("unknown function `{name}`")))?;
             if function.parameters.len() != arguments.len() { return Err(BasisError::new(0, format!("function `{name}` expects {} arguments", function.parameters.len()))); }
-            let mut local = Environment { variables: HashMap::new(), functions: environment.functions.clone() };
+            let mut local = Environment { variables: environment.variables.clone(), functions: environment.functions.clone() };
             for (parameter, argument) in function.parameters.iter().zip(arguments) { local.variables.insert(parameter.clone(), evaluate(argument, environment, output)?); }
             Ok(execute_block(&function.body, &mut local, output, 0)?.unwrap_or(Value::Nothing))
         }
@@ -504,6 +516,9 @@ where
 fn evaluate_condition(condition: &Condition, environment: &mut Environment, output: &mut Vec<String>) -> Result<bool, BasisError> {
     match condition {
         Condition::Truthy(expression) => Ok(is_truthy(&evaluate(expression, environment, output)?)),
+        Condition::Not(condition) => Ok(!evaluate_condition(condition, environment, output)?),
+        Condition::And(left, right) => Ok(evaluate_condition(left, environment, output)? && evaluate_condition(right, environment, output)?),
+        Condition::Or(left, right) => Ok(evaluate_condition(left, environment, output)? || evaluate_condition(right, environment, output)?),
         Condition::Equals(left, right) => Ok(evaluate(left, environment, output)? == evaluate(right, environment, output)?),
         Condition::NotEquals(left, right) => Ok(evaluate(left, environment, output)? != evaluate(right, environment, output)?),
         Condition::GreaterThan(left, right) => compare_values(left, right, environment, output, |ordering| ordering.is_gt()),
@@ -751,6 +766,9 @@ mod tests {
             when score is greater than 3, do
                 say "high enough"
             end
+            when score is 5 and not score is 4, do
+                say "combined"
+            end
             when score is less than 3, do
                 say "wrong branch"
             otherwise, do
@@ -763,7 +781,7 @@ mod tests {
                 say "never"
             end
         "#;
-        assert_eq!(run(&parse(source).unwrap()).unwrap(), vec!["correct", "high enough", "otherwise branch", "again", "again"]);
+        assert_eq!(run(&parse(source).unwrap()).unwrap(), vec!["correct", "high enough", "combined", "otherwise branch", "again", "again"]);
     }
 
     #[test]
@@ -802,5 +820,17 @@ mod tests {
         );
         assert_eq!(run(&parse(&source).unwrap()).unwrap(), vec!["hello", "shell"]);
         assert!(!root.exists());
+    }
+
+    #[test]
+    fn functions_can_read_global_values() {
+        let source = r#"
+            set prefix to "Hello, "
+            define greet using person, do
+                return prefix joined with person
+            end
+            say greet using "Ransom"
+        "#;
+        assert_eq!(run(&parse(source).unwrap()).unwrap(), vec!["Hello, Ransom"]);
     }
 }
