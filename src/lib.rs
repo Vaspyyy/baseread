@@ -9,7 +9,7 @@ use std::{
     process::Command,
     rc::Rc,
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 pub mod lexer;
@@ -74,6 +74,10 @@ pub enum Statement {
     Save { value: Expression, path: Expression },
     Wait(Expression),
     ClearTerminal,
+    DrawText { text: Expression, x: Expression, y: Expression },
+    ClearScreenBuffer,
+    RenderScreen,
+    ResizeScreen { width: Expression, height: Expression },
     ListAdd { path: Vec<String>, value: Expression },
     ListRemove { path: Vec<String>, value: Expression },
     Shell(Expression),
@@ -114,6 +118,9 @@ pub enum Expression {
     ListApplications,
     TerminalWidth,
     TerminalHeight,
+    ScreenWidth,
+    ScreenHeight,
+    Timer,
     RandomNumber { lower: Option<Box<Expression>>, upper: Option<Box<Expression>>, integer: bool },
     RandomChoice(Box<Expression>),
     Minimum(Box<Expression>, Box<Expression>),
@@ -212,12 +219,68 @@ impl RandomState {
     }
 }
 
+#[derive(Clone)]
+struct ScreenBuffer {
+    width: usize,
+    height: usize,
+    cells: Vec<Vec<char>>,
+}
+
+impl ScreenBuffer {
+    fn from_terminal() -> Self {
+        let width = screen_dimension_size(terminal_dimension("COLUMNS", "cols", 80.0), 80);
+        let height = screen_dimension_size(terminal_dimension("LINES", "lines", 24.0), 24);
+        Self::new(width, height)
+    }
+
+    fn new(width: usize, height: usize) -> Self {
+        let width = width.max(1);
+        let height = height.max(1);
+        Self { width, height, cells: vec![vec![' '; width]; height] }
+    }
+
+    fn resize(&mut self, width: usize, height: usize) {
+        *self = Self::new(width, height);
+    }
+
+    fn clear(&mut self) {
+        for row in &mut self.cells {
+            row.fill(' ');
+        }
+    }
+
+    fn draw_text(&mut self, text: &str, x: usize, y: usize) {
+        if x == 0 || y == 0 { return; }
+        let mut row = y - 1;
+        let start_column = x - 1;
+        let mut column = start_column;
+        for character in text.chars() {
+            if character == '\n' {
+                row += 1;
+                column = start_column;
+                continue;
+            }
+            if row >= self.height { break; }
+            if column < self.width {
+                self.cells[row][column] = character;
+            }
+            column += 1;
+        }
+    }
+
+    fn lines(&self) -> Vec<String> {
+        self.cells.iter().map(|row| row.iter().collect()).collect()
+    }
+}
+
 struct Environment {
     variables: HashMap<String, Value>,
     functions: HashMap<String, Function>,
     interactive: bool,
     input: Rc<RefCell<VecDeque<String>>>,
     random: Rc<RefCell<RandomState>>,
+    screen: Rc<RefCell<ScreenBuffer>>,
+    started: Instant,
 }
 
 impl Environment {
@@ -228,6 +291,8 @@ impl Environment {
             interactive: false,
             input: Rc::new(RefCell::new(VecDeque::new())),
             random: Rc::new(RefCell::new(RandomState::new())),
+            screen: Rc::new(RefCell::new(ScreenBuffer::from_terminal())),
+            started: Instant::now(),
         }
     }
 
@@ -250,6 +315,8 @@ impl Environment {
             interactive: self.interactive,
             input: Rc::clone(&self.input),
             random: Rc::clone(&self.random),
+            screen: Rc::clone(&self.screen),
+            started: self.started,
         }
     }
 }
@@ -400,6 +467,23 @@ fn execute_block(statements: &[Statement], environment: &mut Environment, output
                     print!("\x1b[2J\x1b[H");
                     io::stdout().flush().map_err(|error| BasisError::new(0, format!("could not clear terminal: {error}")))?;
                 }
+            }
+            Statement::DrawText { text, x, y } => {
+                let text = value_as_text(text, environment, output)?;
+                let x = terminal_coordinate(x, environment, output, "x")?;
+                let y = terminal_coordinate(y, environment, output, "y")?;
+                environment.screen.borrow_mut().draw_text(&text, x, y);
+            }
+            Statement::ClearScreenBuffer => {
+                environment.screen.borrow_mut().clear();
+            }
+            Statement::RenderScreen => {
+                render_screen(environment, output)?;
+            }
+            Statement::ResizeScreen { width, height } => {
+                let width = screen_coordinate(width, environment, output, "width")?;
+                let height = screen_coordinate(height, environment, output, "height")?;
+                environment.screen.borrow_mut().resize(width, height);
             }
             Statement::ListAdd { path, value } => {
                 let value = evaluate(value, environment, output)?;
@@ -581,6 +665,9 @@ fn evaluate(expression: &Expression, environment: &mut Environment, output: &mut
         Expression::ListApplications => Ok(Value::List(list_applications().into_iter().map(|entry| Value::Text(entry.name)).collect())),
         Expression::TerminalWidth => Ok(Value::Number(terminal_dimension("COLUMNS", "cols", 80.0))),
         Expression::TerminalHeight => Ok(Value::Number(terminal_dimension("LINES", "lines", 24.0))),
+        Expression::ScreenWidth => Ok(Value::Number(environment.screen.borrow().width as f64)),
+        Expression::ScreenHeight => Ok(Value::Number(environment.screen.borrow().height as f64)),
+        Expression::Timer => Ok(Value::Number(environment.started.elapsed().as_secs_f64())),
         Expression::RandomNumber { lower, upper, integer } => random_number(lower.as_deref(), upper.as_deref(), *integer, environment, output),
         Expression::RandomChoice(value) => {
             let value = evaluate(value, environment, output)?;
@@ -724,6 +811,29 @@ fn terminal_coordinate(expression: &Expression, environment: &mut Environment, o
         return Err(BasisError::new(0, format!("cursor {axis} coordinate must be a positive whole number")));
     }
     Ok(value as usize)
+}
+
+fn screen_coordinate(expression: &Expression, environment: &mut Environment, output: &mut Vec<String>, axis: &str) -> Result<usize, BasisError> {
+    let value = evaluate_number(expression, environment, output)?;
+    if !value.is_finite() || value < 1.0 || value.fract() != 0.0 || value > 10_000.0 {
+        return Err(BasisError::new(0, format!("screen {axis} must be a positive whole number below 10000")));
+    }
+    Ok(value as usize)
+}
+
+fn screen_dimension_size(value: f64, fallback: usize) -> usize {
+    if value.is_finite() && value >= 1.0 && value <= 10_000.0 { value as usize } else { fallback }
+}
+
+fn render_screen(environment: &mut Environment, output: &mut Vec<String>) -> Result<(), BasisError> {
+    let lines = environment.screen.borrow().lines();
+    if environment.interactive {
+        print!("\x1b[2J\x1b[H{}\n", lines.join("\n"));
+        io::stdout().flush().map_err(|error| BasisError::new(0, format!("could not render screen: {error}")))?;
+    } else {
+        output.extend(lines);
+    }
+    Ok(())
 }
 
 fn terminal_dimension(environment_name: &str, command_name: &str, fallback: f64) -> f64 {
@@ -1759,5 +1869,24 @@ mod tests {
         assert_eq!(output[0..2], ["x", "danger"]);
         assert!(output[2].parse::<f64>().unwrap() > 0.0);
         assert!(output[3].parse::<f64>().unwrap() > 0.0);
+    }
+
+    #[test]
+    fn draws_and_renders_a_reusable_ascii_screen_buffer() {
+        let source = r#"
+            resize screen to 8, 3
+            draw text "HP" at 5, 1
+            draw text "@" at 2, 2
+            render screen
+            say screen width
+            say screen height
+        "#;
+        assert_eq!(run(&parse(source).unwrap()).unwrap(), vec!["    HP  ", " @      ", "        ", "8", "3"]);
+    }
+
+    #[test]
+    fn exposes_an_elapsed_timer() {
+        let output = run(&parse("say timer").unwrap()).unwrap();
+        assert!(output[0].parse::<f64>().unwrap() >= 0.0);
     }
 }
