@@ -1,0 +1,7 @@
+set name to "Ransom"
+
+define greet using person, do
+    return "Hello, " joined with person
+end
+
+say greet using name
