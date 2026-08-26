@@ -1,0 +1,9 @@
+set source to "notes.txt"
+
+when file exists source, do
+    create folder "backup"
+    copy source to "backup/notes.txt"
+    say "Backed up {source}"
+otherwise, do
+    say "Nothing to back up"
+end
