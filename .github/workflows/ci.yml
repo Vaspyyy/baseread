@@ -15,3 +15,5 @@ jobs:
       - run: cargo run -- --check examples/dungeon.basis
       - run: cargo run -- build examples/hello.basis -o /tmp/basisread-hello
       - run: test "$(/tmp/basisread-hello)" = "Hello, Ransom"
+      - run: cargo run -- build examples/game-smoke.basis -o /tmp/basisread-game-smoke
+      - run: test "$(/tmp/basisread-game-smoke)" = $'Health: 21\n1'
