@@ -10,6 +10,7 @@ use std::{
 };
 
 pub mod lexer;
+pub mod parser;
 pub use lexer::{lex, Span, Token, TokenKind};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -133,16 +134,7 @@ impl fmt::Display for BasisError {
 impl std::error::Error for BasisError {}
 
 pub fn parse(source: &str) -> Result<Program, BasisError> {
-    lex(source)?;
-    let lines: Vec<(usize, &str)> = source
-        .lines()
-        .enumerate()
-        .map(|(index, line)| (index + 1, strip_comment(line).trim()))
-        .filter(|(_, line)| !line.is_empty() && !line.starts_with('#'))
-        .collect();
-    let mut cursor = 0;
-    let (statements, _) = parse_block(&lines, &mut cursor, false, false)?;
-    Ok(Program { statements })
+    parser::parse(source)
 }
 
 fn strip_comment(line: &str) -> &str {
@@ -899,7 +891,7 @@ pub fn run_file(path: impl AsRef<Path>) -> Result<Vec<String>, Box<dyn std::erro
 /// Build a standalone native executable by embedding the validated BASISREAD
 /// source and runtime in a generated Rust program. This bootstrap backend will
 /// be replaced by direct AST code generation once the language core settles.
-pub fn compile_source(source: &str, output_path: impl AsRef<Path>, runtime_source: &str, lexer_source: &str) -> Result<(), Box<dyn std::error::Error>> {
+pub fn compile_source(source: &str, output_path: impl AsRef<Path>, runtime_source: &str, lexer_source: &str, parser_source: &str) -> Result<(), Box<dyn std::error::Error>> {
     parse(source)?;
     let output_path = output_path.as_ref();
     if let Some(parent) = output_path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
@@ -913,6 +905,7 @@ pub fn compile_source(source: &str, output_path: impl AsRef<Path>, runtime_sourc
     let main_path = build_directory.join("main.rs");
     fs::write(&runtime_path, runtime_source)?;
     fs::write(build_directory.join("lexer.rs"), lexer_source)?;
+    fs::write(build_directory.join("parser.rs"), parser_source)?;
     fs::write(&main_path, format!(
         "#[path = \"basisread_runtime.rs\"]\nmod basisread;\n\nconst PROGRAM: &str = {source:?};\n\nfn main() {{\n    match basisread::parse(PROGRAM).and_then(|program| basisread::run(&program)) {{\n        Ok(lines) => for line in lines {{ println!(\"{{line}}\"); }},\n        Err(error) => {{ eprintln!(\"BASISREAD error: {{error}}\"); std::process::exit(1); }}\n    }}\n}}\n"
     ))?;
