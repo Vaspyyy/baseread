@@ -6,6 +6,7 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
     time::{SystemTime, UNIX_EPOCH},
+    io::Write,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -50,6 +51,7 @@ pub enum Statement {
     DeleteFile(Expression),
     DeleteFolder(Expression),
     WriteFile { content: Expression, path: Expression },
+    AppendFile { content: Expression, path: Expression },
     Shell(Expression),
     StartShell(Expression),
     OpenFile(Expression),
@@ -200,6 +202,10 @@ fn parse_block(lines: &[(usize, &str)], cursor: &mut usize, nested: bool, stop_a
         } else if let Some(rest) = line.strip_prefix("write ") {
             let (content, path) = split_phrase(rest, " to file ").ok_or_else(|| BasisError::new(line_number, "expected `write content to file path`"))?;
             statements.push(Statement::WriteFile { content: parse_expression(content, line_number)?, path: parse_expression(path, line_number)? });
+            *cursor += 1;
+        } else if let Some(rest) = line.strip_prefix("append ") {
+            let (content, path) = split_phrase(rest, " to file ").ok_or_else(|| BasisError::new(line_number, "expected `append content to file path`"))?;
+            statements.push(Statement::AppendFile { content: parse_expression(content, line_number)?, path: parse_expression(path, line_number)? });
             *cursor += 1;
         } else if let Some(command) = line.strip_prefix("shell ") {
             statements.push(Statement::Shell(parse_expression(command, line_number)?));
@@ -519,6 +525,12 @@ fn execute_block(statements: &[Statement], environment: &mut Environment, output
                 let content = value_as_text(content, environment, output)?;
                 let path = value_as_path(path, environment, output)?;
                 fs::write(&path, content).map_err(|error| BasisError::new(0, format!("could not write file `{}`: {error}", path.display())))?;
+            }
+            Statement::AppendFile { content, path } => {
+                let content = value_as_text(content, environment, output)?;
+                let path = value_as_path(path, environment, output)?;
+                let mut file = fs::OpenOptions::new().create(true).append(true).open(&path).map_err(|error| BasisError::new(0, format!("could not open file `{}` for appending: {error}", path.display())))?;
+                file.write_all(content.as_bytes()).map_err(|error| BasisError::new(0, format!("could not append to file `{}`: {error}", path.display())))?;
             }
             Statement::Shell(command) => {
                 let command = value_as_text(command, environment, output)?;
@@ -1253,5 +1265,14 @@ mod tests {
         assert_eq!(fs::read_to_string(destination.join("nested/value.txt")).unwrap(), "value");
         fs::remove_dir_all(source).unwrap();
         fs::remove_dir_all(destination).unwrap();
+    }
+
+    #[test]
+    fn appends_to_text_files() {
+        let suffix = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let path = std::env::temp_dir().join(format!("basisread-append-{suffix}.txt"));
+        let source = format!("write \"first\" to file \"{}\"\nappend \" second\" to file \"{}\"\nsay read file \"{}\"\ndelete file \"{}\"", path.display(), path.display(), path.display(), path.display());
+        assert_eq!(run(&parse(&source).unwrap()).unwrap(), vec!["first second"]);
+        assert!(!path.exists());
     }
 }
