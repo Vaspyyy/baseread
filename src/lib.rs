@@ -1,3 +1,20 @@
+}
+
+fn execute_block(statements: &[Statement], environment: &mut Environment, output: &mut Vec<String>, line: usize) -> Result<Option<Value>, BasisError> {
+    for statement in statements {
+        match statement {
+            Statement::Set { name, value } => { let value = evaluate(value, environment, output)?; environment.variables.insert(name.clone(), value); }
+            Statement::Say(expression) => {
+                let value = evaluate(expression, environment, output)?;
+                output.push(value.to_string());
+            }
+            Statement::Run { application } => { launch_application(application)?; }
+            Statement::Define { name, parameters, body } => { environment.functions.insert(name.clone(), Function { parameters: parameters.clone(), body: body.clone() }); }
+            Statement::Return(expression) => return Ok(Some(evaluate(expression, environment, output)?)),
+            Statement::Expression(expression) => { evaluate(expression, environment, output)?; }
+        }
+    }
+    let _ = line;
 use std::{
     collections::HashMap,
     env,
@@ -171,7 +188,10 @@ fn execute_block(statements: &[Statement], environment: &mut Environment, output
     for statement in statements {
         match statement {
             Statement::Set { name, value } => { let value = evaluate(value, environment, output)?; environment.variables.insert(name.clone(), value); }
-            Statement::Say(expression) => output.push(evaluate(expression, environment, output)?.to_string()),
+            Statement::Say(expression) => {
+                let value = evaluate(expression, environment, output)?;
+                output.push(value.to_string());
+            }
             Statement::Run { application } => { launch_application(application)?; }
             Statement::Define { name, parameters, body } => { environment.functions.insert(name.clone(), Function { parameters: parameters.clone(), body: body.clone() }); }
             Statement::Return(expression) => return Ok(Some(evaluate(expression, environment, output)?)),
