@@ -1,5 +1,6 @@
 use std::env;
 use std::io::{self, BufRead, Write};
+use std::path::PathBuf;
 
 fn main() {
     let mut arguments = env::args().skip(1);
@@ -28,8 +29,33 @@ fn main() {
         return;
     }
 
+    if first == "build" || first == "compile" {
+        let Some(source_path) = arguments.next() else {
+            eprintln!("usage: basisread build <file.basis> [-o output]");
+            std::process::exit(2);
+        };
+        let mut output_path = None;
+        while let Some(argument) = arguments.next() {
+            if argument == "-o" {
+                output_path = arguments.next();
+            } else {
+                eprintln!("unknown build argument `{argument}`");
+                std::process::exit(2);
+            }
+        }
+        let output_path = output_path.map(PathBuf::from).unwrap_or_else(|| PathBuf::from(&source_path).with_extension(""));
+        match std::fs::read_to_string(&source_path).map_err(|error| error.to_string()).and_then(|source| basisread::compile_source(&source, &output_path, include_str!("lib.rs")).map_err(|error| error.to_string())) {
+            Ok(()) => println!("built {}", output_path.display()),
+            Err(error) => {
+                eprintln!("BASISREAD build error: {error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     if arguments.next().is_some() {
-        eprintln!("usage: basisread [--version | --check <file.basis> | <file.basis>]");
+        eprintln!("usage: basisread [--version | --check <file.basis> | build <file.basis> [-o output] | <file.basis>]");
         std::process::exit(2);
     }
 
