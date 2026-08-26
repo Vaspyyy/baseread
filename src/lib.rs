@@ -5,6 +5,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -635,6 +636,40 @@ fn evaluate_repeat_count(expression: &Expression, environment: &mut Environment,
 pub fn run_file(path: impl AsRef<Path>) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let source = fs::read_to_string(path)?;
     Ok(run(&parse(&source)?)?)
+}
+
+/// Build a standalone native executable by embedding the validated BASISREAD
+/// source and runtime in a generated Rust program. This bootstrap backend will
+/// be replaced by direct AST code generation once the language core settles.
+pub fn compile_source(source: &str, output_path: impl AsRef<Path>, runtime_source: &str) -> Result<(), Box<dyn std::error::Error>> {
+    parse(source)?;
+    let output_path = output_path.as_ref();
+    if let Some(parent) = output_path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)?;
+    }
+
+    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let build_directory = env::temp_dir().join(format!("basisread-build-{}-{timestamp}", std::process::id()));
+    fs::create_dir_all(&build_directory)?;
+    let runtime_path = build_directory.join("basisread_runtime.rs");
+    let main_path = build_directory.join("main.rs");
+    fs::write(&runtime_path, runtime_source)?;
+    fs::write(&main_path, format!(
+        "#[path = \"basisread_runtime.rs\"]\nmod basisread;\n\nconst PROGRAM: &str = {source:?};\n\nfn main() {{\n    match basisread::parse(PROGRAM).and_then(|program| basisread::run(&program)) {{\n        Ok(lines) => for line in lines {{ println!(\"{{line}}\"); }},\n        Err(error) => {{ eprintln!(\"BASISREAD error: {{error}}\"); std::process::exit(1); }}\n    }}\n}}\n"
+    ))?;
+
+    let result = Command::new("rustc")
+        .arg("--edition=2021")
+        .arg(&main_path)
+        .arg("-C").arg("opt-level=2")
+        .arg("-o").arg(output_path)
+        .status()?;
+    let cleanup_result = fs::remove_dir_all(&build_directory);
+    if !result.success() {
+        return Err(format!("rustc failed with status {result}").into());
+    }
+    cleanup_result?;
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq)]
