@@ -1,12 +1,15 @@
 use std::{
-    collections::HashMap,
+    cell::RefCell,
+    collections::{BTreeMap, HashMap, VecDeque},
     env,
     fmt,
     fs,
+    io::{self, Write},
     path::{Path, PathBuf},
     process::Command,
-    time::{SystemTime, UNIX_EPOCH},
-    io::Write,
+    rc::Rc,
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 pub mod lexer;
@@ -20,6 +23,7 @@ pub enum Value {
     Number(f64),
     Boolean(bool),
     List(Vec<Value>),
+    Object(BTreeMap<String, Value>),
     Nothing,
 }
 
@@ -34,6 +38,10 @@ impl fmt::Display for Value {
                 let values = values.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ");
                 write!(f, "[{values}]")
             }
+            Self::Object(values) => {
+                let values = values.iter().map(|(key, value)| format!("{key}: {value}")).collect::<Vec<_>>().join(", ");
+                write!(f, "{{{values}}}")
+            }
             Self::Nothing => write!(f, "nothing"),
         }
     }
@@ -47,7 +55,9 @@ pub struct Program {
 #[derive(Debug, Clone)]
 pub enum Statement {
     Set { name: String, value: Expression },
+    SetPath { path: Vec<String>, value: Expression },
     SetEnvironment { name: Expression, value: Expression },
+    SeedRandom(Expression),
     Say(Expression),
     Run { application: String, arguments: Vec<Expression> },
     CreateFolder(Expression),
@@ -57,6 +67,11 @@ pub enum Statement {
     DeleteFolder(Expression),
     WriteFile { content: Expression, path: Expression },
     AppendFile { content: Expression, path: Expression },
+    Save { value: Expression, path: Expression },
+    Wait(Expression),
+    ClearTerminal,
+    ListAdd { path: Vec<String>, value: Expression },
+    ListRemove { path: Vec<String>, value: Expression },
     Shell(Expression),
     StartShell(Expression),
     OpenFile(Expression),
@@ -64,6 +79,7 @@ pub enum Statement {
     Stop,
     Skip,
     When { condition: Condition, body: Vec<Statement>, otherwise: Option<Vec<Statement>> },
+    Try { body: Vec<Statement>, otherwise: Vec<Statement> },
     Repeat { count: Expression, body: Vec<Statement> },
     While { condition: Condition, body: Vec<Statement> },
     ForEach { name: String, iterable: Expression, body: Vec<Statement> },
@@ -77,7 +93,11 @@ pub enum Expression {
     Literal(Value),
     Variable(String),
     List(Vec<Expression>),
+    Object(Vec<(String, Expression)>),
+    Field(Box<Expression>, String),
+    Ask(Box<Expression>),
     ReadFile(Box<Expression>),
+    LoadFile(Box<Expression>),
     Length(Box<Expression>),
     At(Box<Expression>, Box<Expression>),
     EnvironmentVariable(Box<Expression>),
@@ -87,6 +107,11 @@ pub enum Expression {
     ListFiles(Box<Expression>),
     ListFolders(Box<Expression>),
     ListApplications,
+    RandomNumber { lower: Option<Box<Expression>>, upper: Option<Box<Expression>>, integer: bool },
+    RandomChoice(Box<Expression>),
+    Minimum(Box<Expression>, Box<Expression>),
+    Maximum(Box<Expression>, Box<Expression>),
+    Clamp { value: Box<Expression>, lower: Box<Expression>, upper: Box<Expression> },
     Add(Box<Expression>, Box<Expression>),
     Subtract(Box<Expression>, Box<Expression>),
     Multiply(Box<Expression>, Box<Expression>),
@@ -148,19 +173,100 @@ pub fn parse(source: &str) -> Result<Program, BasisError> {
 #[derive(Clone)]
 struct Function { parameters: Vec<String>, body: Vec<Statement> }
 
+#[derive(Clone)]
+struct RandomState {
+    state: u64,
+}
+
+impl RandomState {
+    fn new() -> Self {
+        let time_seed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos() as u64)
+            .unwrap_or(0);
+        Self { state: time_seed ^ (std::process::id() as u64) | 1 }
+    }
+
+    fn seed(&mut self, seed: u64) {
+        self.state = seed | 1;
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        let mut value = self.state;
+        value ^= value >> 12;
+        value ^= value << 25;
+        value ^= value >> 27;
+        self.state = value;
+        value.wrapping_mul(2_685_821_657_736_338_717)
+    }
+
+    fn next_unit(&mut self) -> f64 {
+        (self.next_u64() >> 11) as f64 / ((1_u64 << 53) as f64)
+    }
+}
+
 struct Environment {
     variables: HashMap<String, Value>,
     functions: HashMap<String, Function>,
+    interactive: bool,
+    input: Rc<RefCell<VecDeque<String>>>,
+    random: Rc<RefCell<RandomState>>,
 }
 
 impl Environment {
-    fn new() -> Self { Self { variables: HashMap::new(), functions: HashMap::new() } }
+    fn new() -> Self {
+        Self {
+            variables: HashMap::new(),
+            functions: HashMap::new(),
+            interactive: false,
+            input: Rc::new(RefCell::new(VecDeque::new())),
+            random: Rc::new(RefCell::new(RandomState::new())),
+        }
+    }
+
+    fn with_input(input: &[&str]) -> Self {
+        let mut environment = Self::new();
+        environment.input = Rc::new(RefCell::new(input.iter().map(|value| (*value).to_string()).collect()));
+        environment
+    }
+
+    fn interactive() -> Self {
+        let mut environment = Self::new();
+        environment.interactive = true;
+        environment
+    }
+
+    fn child(&self) -> Self {
+        Self {
+            variables: self.variables.clone(),
+            functions: self.functions.clone(),
+            interactive: self.interactive,
+            input: Rc::clone(&self.input),
+            random: Rc::clone(&self.random),
+        }
+    }
 }
 
 pub fn run(program: &Program) -> Result<Vec<String>, BasisError> {
     let mut environment = Environment::new();
     let mut output = Vec::new();
-    match execute_block(&program.statements, &mut environment, &mut output, 0)? {
+    finish_run(execute_block(&program.statements, &mut environment, &mut output, 0)?, output)
+}
+
+pub fn run_with_input(program: &Program, input: &[&str]) -> Result<Vec<String>, BasisError> {
+    let mut environment = Environment::with_input(input);
+    let mut output = Vec::new();
+    finish_run(execute_block(&program.statements, &mut environment, &mut output, 0)?, output)
+}
+
+pub fn run_interactive(program: &Program) -> Result<(), BasisError> {
+    let mut environment = Environment::interactive();
+    let mut output = Vec::new();
+    finish_run(execute_block(&program.statements, &mut environment, &mut output, 0)?, output).map(|_| ())
+}
+
+fn finish_run(flow: Flow, output: Vec<String>) -> Result<Vec<String>, BasisError> {
+    match flow {
         Flow::Next => {}
         Flow::Return(_) => return Err(BasisError::new(0, "return can only be used inside a function")),
         Flow::Break => return Err(BasisError::new(0, "stop can only be used inside a loop")),
@@ -181,14 +287,29 @@ fn execute_block(statements: &[Statement], environment: &mut Environment, output
     for statement in statements {
         match statement {
             Statement::Set { name, value } => { let value = evaluate(value, environment, output)?; environment.variables.insert(name.clone(), value); }
+            Statement::SetPath { path, value } => {
+                let value = evaluate(value, environment, output)?;
+                set_environment_path(&mut environment.variables, path, value)?;
+            }
             Statement::SetEnvironment { name, value } => {
                 let name = value_as_text(name, environment, output)?;
                 let value = value_as_text(value, environment, output)?;
                 env::set_var(name, value);
             }
+            Statement::SeedRandom(seed) => {
+                let seed = evaluate_number(seed, environment, output)?;
+                if seed < 0.0 || seed.fract() != 0.0 || !seed.is_finite() {
+                    return Err(BasisError::new(0, "random seed requires a finite non-negative whole number"));
+                }
+                environment.random.borrow_mut().seed(seed as u64);
+            }
             Statement::Say(expression) => {
                 let value = evaluate(expression, environment, output)?;
-                output.push(value.to_string());
+                let text = value.to_string();
+                if environment.interactive {
+                    println!("{text}");
+                }
+                output.push(text);
             }
             Statement::Run { application, arguments } => {
                 let arguments = arguments.iter().map(|argument| evaluate(argument, environment, output).map(|value| value.to_string())).collect::<Result<_, _>>()?;
@@ -227,6 +348,32 @@ fn execute_block(statements: &[Statement], environment: &mut Environment, output
                 let mut file = fs::OpenOptions::new().create(true).append(true).open(&path).map_err(|error| BasisError::new(0, format!("could not open file `{}` for appending: {error}", path.display())))?;
                 file.write_all(content.as_bytes()).map_err(|error| BasisError::new(0, format!("could not append to file `{}`: {error}", path.display())))?;
             }
+            Statement::Save { value, path } => {
+                let value = evaluate(value, environment, output)?;
+                let path = value_as_path(path, environment, output)?;
+                fs::write(&path, serialize_value(&value)).map_err(|error| BasisError::new(0, format!("could not save state to `{}`: {error}", path.display())))?;
+            }
+            Statement::Wait(seconds) => {
+                let seconds = evaluate_number(seconds, environment, output)?;
+                if seconds < 0.0 || !seconds.is_finite() {
+                    return Err(BasisError::new(0, "wait requires a finite non-negative number of seconds"));
+                }
+                thread::sleep(Duration::from_secs_f64(seconds));
+            }
+            Statement::ClearTerminal => {
+                if environment.interactive {
+                    print!("\x1b[2J\x1b[H");
+                    io::stdout().flush().map_err(|error| BasisError::new(0, format!("could not clear terminal: {error}")))?;
+                }
+            }
+            Statement::ListAdd { path, value } => {
+                let value = evaluate(value, environment, output)?;
+                list_add(&mut environment.variables, path, value)?;
+            }
+            Statement::ListRemove { path, value } => {
+                let value = evaluate(value, environment, output)?;
+                list_remove(&mut environment.variables, path, &value)?;
+            }
             Statement::Shell(command) => {
                 let command = value_as_text(command, environment, output)?;
                 run_shell(command, output)?;
@@ -255,6 +402,17 @@ fn execute_block(statements: &[Statement], environment: &mut Environment, output
                 } else if let Some(otherwise) = otherwise {
                     let flow = execute_block(otherwise, environment, output, line)?;
                     if !matches!(&flow, Flow::Next) { return Ok(flow); }
+                }
+            }
+            Statement::Try { body, otherwise } => {
+                match execute_block(body, environment, output, line) {
+                    Ok(flow) => {
+                        if !matches!(&flow, Flow::Next) { return Ok(flow); }
+                    }
+                    Err(_) => {
+                        let flow = execute_block(otherwise, environment, output, line)?;
+                        if !matches!(&flow, Flow::Next) { return Ok(flow); }
+                    }
                 }
             }
             Statement::Repeat { count, body } => {
@@ -310,33 +468,63 @@ fn evaluate(expression: &Expression, environment: &mut Environment, output: &mut
                 if !function.parameters.is_empty() {
                     return Err(BasisError::new(0, format!("function `{name}` expects {} arguments", function.parameters.len())));
                 }
-                let mut local = Environment { variables: environment.variables.clone(), functions: environment.functions.clone() };
+                let mut local = environment.child();
                 function_result(execute_block(&function.body, &mut local, output, 0)?)
             } else {
                 Err(BasisError::new(0, format!("unknown variable or function `{name}`")))
             }
         }
         Expression::List(expressions) => Ok(Value::List(expressions.iter().map(|expression| evaluate(expression, environment, output)).collect::<Result<_, _>>()?)),
+        Expression::Object(entries) => {
+            let mut values = BTreeMap::new();
+            for (key, expression) in entries {
+                values.insert(key.clone(), evaluate(expression, environment, output)?);
+            }
+            Ok(Value::Object(values))
+        }
+        Expression::Field(value, field) => {
+            let value = evaluate(value, environment, output)?;
+            match value {
+                Value::Object(values) => values.get(field).cloned().ok_or_else(|| BasisError::new(0, format!("object has no field `{field}`"))),
+                other => Err(BasisError::new(0, format!("cannot read field `{field}` from {other}"))),
+            }
+        }
+        Expression::Ask(prompt) => ask_value(prompt, environment, output),
         Expression::ReadFile(path) => {
             let path = value_as_path(path, environment, output)?;
             Ok(Value::Text(fs::read_to_string(&path).map_err(|error| BasisError::new(0, format!("could not read file `{}`: {error}", path.display())))?))
+        }
+        Expression::LoadFile(path) => {
+            let path = value_as_path(path, environment, output)?;
+            let source = fs::read_to_string(&path).map_err(|error| BasisError::new(0, format!("could not load state from `{}`: {error}", path.display())))?;
+            deserialize_value(&source).map_err(|error| BasisError::new(0, format!("could not load state from `{}`: {error}", path.display())))
         }
         Expression::Length(value) => {
             let value = evaluate(value, environment, output)?;
             let length = match value {
                 Value::Text(value) => value.chars().count(),
                 Value::List(values) => values.len(),
-                _ => return Err(BasisError::new(0, "length requires text or a list")),
+                Value::Object(values) => values.len(),
+                _ => return Err(BasisError::new(0, "length requires text, a list, or an object")),
             };
             Ok(Value::Number(length as f64))
         }
         Expression::At(value, index) => {
             let value = evaluate(value, environment, output)?;
-            let index = evaluate_repeat_count(index, environment, output)?;
-            match value {
-                Value::List(values) => values.get(index).cloned().ok_or_else(|| BasisError::new(0, format!("list index {index} is out of bounds"))),
-                Value::Text(value) => value.chars().nth(index).map(|character| Value::Text(character.to_string())).ok_or_else(|| BasisError::new(0, format!("text index {index} is out of bounds"))),
-                _ => Err(BasisError::new(0, "at requires text or a list")),
+            let index_value = evaluate(index, environment, output)?;
+            match (value, index_value) {
+                (Value::List(values), Value::Number(index)) if index >= 0.0 && index.fract() == 0.0 => {
+                    let index = index as usize;
+                    values.get(index).cloned().ok_or_else(|| BasisError::new(0, format!("list index {index} is out of bounds")))
+                }
+                (Value::Text(value), Value::Number(index)) if index >= 0.0 && index.fract() == 0.0 => {
+                    let index = index as usize;
+                    value.chars().nth(index).map(|character| Value::Text(character.to_string())).ok_or_else(|| BasisError::new(0, format!("text index {index} is out of bounds")))
+                }
+                (Value::Object(values), Value::Text(key)) => values.get(&key).cloned().ok_or_else(|| BasisError::new(0, format!("object has no key `{key}`"))),
+                (Value::List(_) | Value::Text(_), other) => Err(BasisError::new(0, format!("index requires a non-negative whole number, got {other}"))),
+                (Value::Object(_), other) => Err(BasisError::new(0, format!("object access requires a text key, got {other}"))),
+                (_, _) => Err(BasisError::new(0, "at requires text, a list, or an object")),
             }
         }
         Expression::EnvironmentVariable(name) => {
@@ -355,6 +543,27 @@ fn evaluate(expression: &Expression, environment: &mut Environment, output: &mut
         Expression::ListFiles(path) => list_directory(path, environment, output, false),
         Expression::ListFolders(path) => list_directory(path, environment, output, true),
         Expression::ListApplications => Ok(Value::List(list_applications().into_iter().map(|entry| Value::Text(entry.name)).collect())),
+        Expression::RandomNumber { lower, upper, integer } => random_number(lower.as_deref(), upper.as_deref(), *integer, environment, output),
+        Expression::RandomChoice(value) => {
+            let value = evaluate(value, environment, output)?;
+            let Value::List(values) = value else { return Err(BasisError::new(0, "random choice requires a list")); };
+            if values.is_empty() {
+                return Err(BasisError::new(0, "random choice cannot choose from an empty list"));
+            }
+            let index = (environment.random.borrow_mut().next_unit() * values.len() as f64) as usize;
+            Ok(values[index.min(values.len() - 1)].clone())
+        }
+        Expression::Minimum(left, right) => numeric_extreme(left, right, environment, output, f64::min),
+        Expression::Maximum(left, right) => numeric_extreme(left, right, environment, output, f64::max),
+        Expression::Clamp { value, lower, upper } => {
+            let value = evaluate_number(value, environment, output)?;
+            let lower = evaluate_number(lower, environment, output)?;
+            let upper = evaluate_number(upper, environment, output)?;
+            if lower > upper {
+                return Err(BasisError::new(0, "clamp lower bound cannot be greater than upper bound"));
+            }
+            Ok(Value::Number(value.clamp(lower, upper)))
+        }
         Expression::Add(left, right) => numeric_operation(left, right, environment, output, |left, right| left + right),
         Expression::Subtract(left, right) => numeric_operation(left, right, environment, output, |left, right| left - right),
         Expression::Multiply(left, right) => numeric_operation(left, right, environment, output, |left, right| left * right),
@@ -370,7 +579,7 @@ fn evaluate(expression: &Expression, environment: &mut Environment, output: &mut
         Expression::Call { name, arguments } => {
             let function = environment.functions.get(name).cloned().ok_or_else(|| BasisError::new(0, format!("unknown function `{name}`")))?;
             if function.parameters.len() != arguments.len() { return Err(BasisError::new(0, format!("function `{name}` expects {} arguments", function.parameters.len()))); }
-            let mut local = Environment { variables: environment.variables.clone(), functions: environment.functions.clone() };
+            let mut local = environment.child();
             for (parameter, argument) in function.parameters.iter().zip(arguments) { local.variables.insert(parameter.clone(), evaluate(argument, environment, output)?); }
             function_result(execute_block(&function.body, &mut local, output, 0)?)
         }
@@ -383,6 +592,267 @@ fn function_result(flow: Flow) -> Result<Value, BasisError> {
         Flow::Return(value) => Ok(value),
         Flow::Break => Err(BasisError::new(0, "stop cannot leave a function")),
         Flow::Continue => Err(BasisError::new(0, "skip cannot leave a function")),
+    }
+}
+
+fn evaluate_number(expression: &Expression, environment: &mut Environment, output: &mut Vec<String>) -> Result<f64, BasisError> {
+    match evaluate(expression, environment, output)? {
+        Value::Number(value) => Ok(value),
+        value => Err(BasisError::new(0, format!("expected a number, got {value}"))),
+    }
+}
+
+fn ask_value(prompt: &Expression, environment: &mut Environment, output: &mut Vec<String>) -> Result<Value, BasisError> {
+    let prompt = value_as_text(prompt, environment, output)?;
+    if environment.interactive {
+        print!("{prompt}");
+        io::stdout().flush().map_err(|error| BasisError::new(0, format!("could not show input prompt: {error}")))?;
+    }
+    let answer = if let Some(answer) = environment.input.borrow_mut().pop_front() {
+        answer
+    } else if environment.interactive {
+        let mut answer = String::new();
+        io::stdin().read_line(&mut answer).map_err(|error| BasisError::new(0, format!("could not read input: {error}")))?;
+        answer.trim_end_matches(['\r', '\n']).to_string()
+    } else {
+        return Err(BasisError::new(0, "ask needs input; use run_interactive or run_with_input"));
+    };
+    Ok(Value::Text(answer))
+}
+
+fn random_number(
+    lower: Option<&Expression>,
+    upper: Option<&Expression>,
+    integer: bool,
+    environment: &mut Environment,
+    output: &mut Vec<String>,
+) -> Result<Value, BasisError> {
+    let (Some(lower), Some(upper)) = (lower, upper) else {
+        if lower.is_some() || upper.is_some() {
+            return Err(BasisError::new(0, "random number needs both a lower and upper bound"));
+        }
+        return Ok(Value::Number(environment.random.borrow_mut().next_unit()));
+    };
+    let lower = evaluate_number(lower, environment, output)?;
+    let upper = evaluate_number(upper, environment, output)?;
+    if !lower.is_finite() || !upper.is_finite() || lower > upper {
+        return Err(BasisError::new(0, "random number bounds must be finite and ordered"));
+    }
+    if integer {
+        if lower.fract() != 0.0 || upper.fract() != 0.0 || upper - lower > u64::MAX as f64 - 1.0 {
+            return Err(BasisError::new(0, "random integer bounds must be whole numbers in a practical range"));
+        }
+        let low = lower as i128;
+        let high = upper as i128;
+        let span = (high - low + 1) as u128;
+        let random = (environment.random.borrow_mut().next_u64() as u128) % span;
+        return Ok(Value::Number((low as f64) + random as f64));
+    }
+    Ok(Value::Number(lower + (upper - lower) * environment.random.borrow_mut().next_unit()))
+}
+
+fn numeric_extreme(
+    left: &Expression,
+    right: &Expression,
+    environment: &mut Environment,
+    output: &mut Vec<String>,
+    operation: fn(f64, f64) -> f64,
+) -> Result<Value, BasisError> {
+    let left = evaluate_number(left, environment, output)?;
+    let right = evaluate_number(right, environment, output)?;
+    Ok(Value::Number(operation(left, right)))
+}
+
+fn lookup_environment_path(variables: &HashMap<String, Value>, path: &[String]) -> Option<Value> {
+    let (root, fields) = path.split_first()?;
+    let mut value = variables.get(root)?.clone();
+    for field in fields {
+        let Value::Object(values) = value else { return None; };
+        value = values.get(field)?.clone();
+    }
+    Some(value)
+}
+
+fn set_environment_path(variables: &mut HashMap<String, Value>, path: &[String], value: Value) -> Result<(), BasisError> {
+    let (root, fields) = path.split_first().ok_or_else(|| BasisError::new(0, "assignment needs a variable name"))?;
+    if fields.is_empty() {
+        variables.insert(root.clone(), value);
+        return Ok(());
+    }
+    let target = variables.get_mut(root).ok_or_else(|| BasisError::new(0, format!("unknown variable `{root}`")))?;
+    set_nested_value(target, fields, value)
+}
+
+fn set_nested_value(target: &mut Value, fields: &[String], value: Value) -> Result<(), BasisError> {
+    if fields.is_empty() {
+        *target = value;
+        return Ok(());
+    }
+    let Value::Object(values) = target else {
+        return Err(BasisError::new(0, format!("cannot assign field `{}` on a non-object", fields[0])));
+    };
+    let child = values.get_mut(&fields[0]).ok_or_else(|| BasisError::new(0, format!("object has no field `{}`", fields[0])))?;
+    set_nested_value(child, &fields[1..], value)
+}
+
+fn nested_value_mut<'a>(target: &'a mut Value, fields: &[String]) -> Result<&'a mut Value, BasisError> {
+    if fields.is_empty() {
+        return Ok(target);
+    }
+    let Value::Object(values) = target else {
+        return Err(BasisError::new(0, format!("cannot access field `{}` on a non-object", fields[0])));
+    };
+    let child = values.get_mut(&fields[0]).ok_or_else(|| BasisError::new(0, format!("object has no field `{}`", fields[0])))?;
+    nested_value_mut(child, &fields[1..])
+}
+
+fn list_add(variables: &mut HashMap<String, Value>, path: &[String], value: Value) -> Result<(), BasisError> {
+    let (root, fields) = path.split_first().ok_or_else(|| BasisError::new(0, "list add needs a variable name"))?;
+    let target = variables.get_mut(root).ok_or_else(|| BasisError::new(0, format!("unknown variable `{root}`")))?;
+    let target = nested_value_mut(target, fields)?;
+    let Value::List(values) = target else { return Err(BasisError::new(0, "add requires a list")); };
+    values.push(value);
+    Ok(())
+}
+
+fn list_remove(variables: &mut HashMap<String, Value>, path: &[String], value: &Value) -> Result<(), BasisError> {
+    let (root, fields) = path.split_first().ok_or_else(|| BasisError::new(0, "list remove needs a variable name"))?;
+    let target = variables.get_mut(root).ok_or_else(|| BasisError::new(0, format!("unknown variable `{root}`")))?;
+    let target = nested_value_mut(target, fields)?;
+    let Value::List(values) = target else { return Err(BasisError::new(0, "remove requires a list")); };
+    if let Some(index) = values.iter().position(|candidate| candidate == value) {
+        values.remove(index);
+    }
+    Ok(())
+}
+
+fn serialize_value(value: &Value) -> String {
+    match value {
+        Value::Text(value) => format!("\"{}\"", escape_state_text(value)),
+        Value::Number(value) if value.is_finite() => value.to_string(),
+        Value::Number(_) => "null".to_string(),
+        Value::Boolean(value) => value.to_string(),
+        Value::List(values) => format!("[{}]", values.iter().map(serialize_value).collect::<Vec<_>>().join(",")),
+        Value::Object(values) => format!("{{{}}}", values.iter().map(|(key, value)| format!("\"{}\":{}", escape_state_text(key), serialize_value(value))).collect::<Vec<_>>().join(",")),
+        Value::Nothing => "null".to_string(),
+    }
+}
+
+fn escape_state_text(value: &str) -> String {
+    value.chars().flat_map(|character| match character {
+        '"' => "\\\"".chars().collect::<Vec<_>>(),
+        '\\' => "\\\\".chars().collect::<Vec<_>>(),
+        '\n' => "\\n".chars().collect::<Vec<_>>(),
+        '\r' => "\\r".chars().collect::<Vec<_>>(),
+        '\t' => "\\t".chars().collect::<Vec<_>>(),
+        other => vec![other],
+    }).collect()
+}
+
+fn deserialize_value(source: &str) -> Result<Value, String> {
+    let mut parser = StateParser { characters: source.chars().collect(), cursor: 0 };
+    let value = parser.parse_value()?;
+    parser.skip_whitespace();
+    if parser.cursor != parser.characters.len() {
+        return Err("unexpected data after saved value".to_string());
+    }
+    Ok(value)
+}
+
+struct StateParser {
+    characters: Vec<char>,
+    cursor: usize,
+}
+
+impl StateParser {
+    fn parse_value(&mut self) -> Result<Value, String> {
+        self.skip_whitespace();
+        match self.current() {
+            Some('"') => Ok(Value::Text(self.parse_string()?)),
+            Some('[') => self.parse_list(),
+            Some('{') => self.parse_object(),
+            Some('t') if self.consume_word("true") => Ok(Value::Boolean(true)),
+            Some('f') if self.consume_word("false") => Ok(Value::Boolean(false)),
+            Some('n') if self.consume_word("null") => Ok(Value::Nothing),
+            Some('-' | '0'..='9') => self.parse_number(),
+            _ => Err("expected a saved value".to_string()),
+        }
+    }
+
+    fn parse_string(&mut self) -> Result<String, String> {
+        if !self.consume_character('"') { return Err("expected a quoted string".to_string()); }
+        let mut value = String::new();
+        while let Some(character) = self.next() {
+            match character {
+                '"' => return Ok(value),
+                '\\' => {
+                    let escaped = self.next().ok_or_else(|| "unterminated saved string".to_string())?;
+                    value.push(match escaped { 'n' => '\n', 'r' => '\r', 't' => '\t', '"' => '"', '\\' => '\\', other => other });
+                }
+                other => value.push(other),
+            }
+        }
+        Err("unterminated saved string".to_string())
+    }
+
+    fn parse_number(&mut self) -> Result<Value, String> {
+        let start = self.cursor;
+        while matches!(self.current(), Some(character) if character.is_ascii_digit() || matches!(character, '-' | '+' | '.' | 'e' | 'E')) { self.cursor += 1; }
+        let text: String = self.characters[start..self.cursor].iter().collect();
+        text.parse::<f64>().map(Value::Number).map_err(|_| format!("invalid saved number `{text}`"))
+    }
+
+    fn parse_list(&mut self) -> Result<Value, String> {
+        self.consume_character('[');
+        let mut values = Vec::new();
+        loop {
+            self.skip_whitespace();
+            if self.consume_character(']') { return Ok(Value::List(values)); }
+            values.push(self.parse_value()?);
+            self.skip_whitespace();
+            if self.consume_character(']') { return Ok(Value::List(values)); }
+            if !self.consume_character(',') { return Err("expected `,` or `]` in saved list".to_string()); }
+        }
+    }
+
+    fn parse_object(&mut self) -> Result<Value, String> {
+        self.consume_character('{');
+        let mut values = BTreeMap::new();
+        loop {
+            self.skip_whitespace();
+            if self.consume_character('}') { return Ok(Value::Object(values)); }
+            let key = self.parse_string()?;
+            self.skip_whitespace();
+            if !self.consume_character(':') { return Err("expected `:` in saved object".to_string()); }
+            values.insert(key, self.parse_value()?);
+            self.skip_whitespace();
+            if self.consume_character('}') { return Ok(Value::Object(values)); }
+            if !self.consume_character(',') { return Err("expected `,` or `}` in saved object".to_string()); }
+        }
+    }
+
+    fn consume_word(&mut self, word: &str) -> bool {
+        let end = self.cursor + word.chars().count();
+        if self.characters.get(self.cursor..end).is_some_and(|characters| characters.iter().collect::<String>() == word) {
+            self.cursor = end;
+            true
+        } else { false }
+    }
+
+    fn skip_whitespace(&mut self) {
+        while matches!(self.current(), Some(character) if character.is_whitespace()) { self.cursor += 1; }
+    }
+
+    fn consume_character(&mut self, expected: char) -> bool {
+        if self.current() == Some(expected) { self.cursor += 1; true } else { false }
+    }
+
+    fn current(&self) -> Option<char> { self.characters.get(self.cursor).copied() }
+
+    fn next(&mut self) -> Option<char> {
+        let character = self.current()?;
+        self.cursor += 1;
+        Some(character)
     }
 }
 
@@ -408,7 +878,8 @@ fn interpolate_text(template: &str, environment: &Environment) -> Result<String,
             break;
         };
         let name = after_start[..end].trim();
-        let value = environment.variables.get(name).ok_or_else(|| BasisError::new(0, format!("unknown interpolation variable `{name}`")))?;
+        let path = name.split('.').map(str::to_string).collect::<Vec<_>>();
+        let value = lookup_environment_path(&environment.variables, &path).ok_or_else(|| BasisError::new(0, format!("unknown interpolation variable `{name}`")))?;
         result.push_str(&value.to_string());
         remaining = &after_start[end + 1..];
     }
@@ -513,6 +984,7 @@ fn contains_value(left: Value, right: Value) -> Result<bool, BasisError> {
     match (left, right) {
         (Value::Text(left), Value::Text(right)) => Ok(left.contains(&right)),
         (Value::List(values), right) => Ok(values.contains(&right)),
+        (Value::Object(values), Value::Text(key)) => Ok(values.contains_key(&key)),
         _ => Err(BasisError::new(0, "contains requires text or a list")),
     }
 }
@@ -532,6 +1004,7 @@ fn is_truthy(value: &Value) -> bool {
         Value::Number(value) => *value != 0.0,
         Value::Text(value) => !value.is_empty(),
         Value::List(values) => !values.is_empty(),
+        Value::Object(values) => !values.is_empty(),
         Value::Nothing => false,
     }
 }
@@ -561,6 +1034,12 @@ fn evaluate_repeat_count(expression: &Expression, environment: &mut Environment,
 pub fn run_file(path: impl AsRef<Path>) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let source = fs::read_to_string(path)?;
     Ok(run(&parse(&source)?)?)
+}
+
+pub fn run_file_interactive(path: impl AsRef<Path>) -> Result<(), Box<dyn std::error::Error>> {
+    let source = fs::read_to_string(path)?;
+    run_interactive(&parse(&source)?)?;
+    Ok(())
 }
 
 /// Build a standalone native executable by embedding the validated BASISREAD
