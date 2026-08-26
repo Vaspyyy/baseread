@@ -133,12 +133,29 @@ pub fn parse(source: &str) -> Result<Program, BasisError> {
     let lines: Vec<(usize, &str)> = source
         .lines()
         .enumerate()
-        .map(|(index, line)| (index + 1, line.trim()))
+        .map(|(index, line)| (index + 1, strip_comment(line).trim()))
         .filter(|(_, line)| !line.is_empty() && !line.starts_with('#'))
         .collect();
     let mut cursor = 0;
     let (statements, _) = parse_block(&lines, &mut cursor, false, false)?;
     Ok(Program { statements })
+}
+
+fn strip_comment(line: &str) -> &str {
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, character) in line.char_indices() {
+        if escaped { escaped = false; continue; }
+        if character == '\\' && quote.is_some() { escaped = true; continue; }
+        if quote == Some(character) {
+            quote = None;
+        } else if quote.is_none() && (character == '\'' || character == '"') {
+            quote = Some(character);
+        } else if quote.is_none() && character == '#' {
+            return &line[..index];
+        }
+    }
+    line
 }
 
 fn parse_block(lines: &[(usize, &str)], cursor: &mut usize, nested: bool, stop_at_otherwise: bool) -> Result<(Vec<Statement>, bool), BasisError> {
@@ -1294,6 +1311,12 @@ mod tests {
     fn unescapes_text_literals() {
         let source = r#"say "line one\nline two\tend""#;
         assert_eq!(run(&parse(source).unwrap()).unwrap(), vec!["line one\nline two\tend"]);
+    }
+
+    #[test]
+    fn supports_inline_comments_without_touching_text() {
+        let source = "say \"hello # world\" # this is a comment\n# another comment\nsay \"done\"";
+        assert_eq!(run(&parse(source).unwrap()).unwrap(), vec!["hello # world", "done"]);
     }
 
     #[test]
