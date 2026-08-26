@@ -7,6 +7,8 @@ filesystem automation, shell commands, and desktop-entry application launching:
 
 ```basisread
 run firefox
+set name to "Ransom"
+say "Hello, {name}"
 create folder "backup"
 copy "notes.txt" to "backup/notes.txt"
 say read file "notes.txt"
