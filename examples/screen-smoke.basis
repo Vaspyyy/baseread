@@ -1,0 +1,4 @@
+resize screen to 12, 3
+draw text "@" at 2, 2
+render screen
+say "done"
