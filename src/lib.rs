@@ -380,16 +380,16 @@ fn parse_condition(source: &str, line: usize) -> Result<Condition, BasisError> {
     if let Some((left, right)) = split_phrase(source, " ends with ") {
         return Ok(Condition::EndsWith(parse_expression(left, line)?, parse_expression(right, line)?));
     }
-    if let Some((left, right)) = source.split_once(" is not ") {
+    if let Some((left, right)) = split_phrase(source, " is not ") {
         return Ok(Condition::NotEquals(parse_expression(left, line)?, parse_expression(right, line)?));
     }
-    if let Some((left, right)) = source.split_once(" is greater than ") {
+    if let Some((left, right)) = split_phrase(source, " is greater than ") {
         return Ok(Condition::GreaterThan(parse_expression(left, line)?, parse_expression(right, line)?));
     }
-    if let Some((left, right)) = source.split_once(" is less than ") {
+    if let Some((left, right)) = split_phrase(source, " is less than ") {
         return Ok(Condition::LessThan(parse_expression(left, line)?, parse_expression(right, line)?));
     }
-    if let Some((left, right)) = source.split_once(" is ") {
+    if let Some((left, right)) = split_phrase(source, " is ") {
         return Ok(Condition::Equals(parse_expression(left, line)?, parse_expression(right, line)?));
     }
     Ok(Condition::Truthy(parse_expression(source, line)?))
@@ -1088,6 +1088,9 @@ mod tests {
             when "BASISREAD" contains "READ", do
                 say "contains"
             end
+            when "this is text" is "this is text", do
+                say "quoted condition"
+            end
             set names to ["Ada", "Grace"]
             when names contains "Ada", do
                 say "list contains"
@@ -1104,7 +1107,7 @@ mod tests {
                 say "never"
             end
         "#;
-        assert_eq!(run(&parse(source).unwrap()).unwrap(), vec!["correct", "high enough", "combined", "archive", "contains", "list contains", "otherwise branch", "again", "again"]);
+        assert_eq!(run(&parse(source).unwrap()).unwrap(), vec!["correct", "high enough", "combined", "archive", "contains", "quoted condition", "list contains", "otherwise branch", "again", "again"]);
     }
 
     #[test]
