@@ -139,6 +139,11 @@ impl fmt::Display for BasisError {
 }
 
 impl std::error::Error for BasisError {}
+
+pub fn parse(source: &str) -> Result<Program, BasisError> {
+    parser::parse(source)
+}
+
 #[derive(Clone)]
 struct Function { parameters: Vec<String>, body: Vec<Statement> }
 
